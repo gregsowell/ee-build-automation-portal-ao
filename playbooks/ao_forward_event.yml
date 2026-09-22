@@ -63,11 +63,10 @@
     - name: Collect every file the push added or changed
       ansible.builtin.set_fact:
         _changed_files: >-
-          {{ (ee_event.commits | default([]) | map(attribute='added') | flatten)
-             + (ee_event.commits | default([]) | map(attribute='modified') | flatten)
-             + (ee_event.head_commit.added | default([]))
-             + (ee_event.head_commit.modified | default([]))
-             | unique }}
+          {{ ((ee_event.commits | default([]) | map(attribute='added') | flatten)
+              + (ee_event.commits | default([]) | map(attribute='modified') | flatten)
+              + (ee_event.head_commit.added | default([]))
+              + (ee_event.head_commit.modified | default([]))) | unique }}
 
     - name: Keep the YAML files
       ansible.builtin.set_fact:
@@ -75,7 +74,7 @@
           {{ _changed_files | select('search', '\.ya?ml$')
              | reject('search', '(^|/)catalog-info\.ya?ml$')
              | reject('search', '(^|/)\.github/')
-             | list }}
+             | unique | list }}
 
     - name: Stop when the push is not a definition change on {{ ee_definition_branch }}
       when: _ref != 'refs/heads/' ~ ee_definition_branch or _candidates | length == 0
