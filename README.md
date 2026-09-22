@@ -90,7 +90,24 @@ Then:
 5. Send a test push and confirm the event arrives, then take the event stream
    out of test mode so events reach the activation.
 6. Configure the portal, as described in [portal/README.md](portal/README.md).
-7. Give the workflow's AI step an LLM provider in the orchestrator.
+7. Give the workflow's AI step an LLM provider in the orchestrator:
+   **Configuration > Integrations > Add**, type *LLM provider* (Red Hat AI,
+   OpenAI, Anthropic, Gemini or custom), then enable a model and mark it
+   default. Without one, a failed build stops at the repair step.
+
+## Things that bite
+
+- **The event stream starts in test mode.** Events are recorded but never reach
+  the activation until you turn it off.
+- **A running activation cannot be patched.** Rerunning `configure_aap.yml`
+  leaves it alone; delete it (or pass `eda_replace_activation=true`) to pick up
+  a changed rulebook.
+- **Orchestrator conditions have no boolean literals.** A bare `true` or `false`
+  is read as a step name, which is why the agent answers `yes` and `no`.
+- **A do_while condition runs after the body**, so it can reference the build
+  step, and the loop's `complete` port fires on success as well as on giving up.
+- **Base images need an explicit tag.** `registry.redhat.io` rejects `latest`
+  for the ee-minimal repositories.
 
 ## How the loop decides what to do
 
