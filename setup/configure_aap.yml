@@ -324,8 +324,8 @@
           project: "{{ _project_id | int }}"
           playbook: playbooks/ao_forward_event.yml
           ask_variables_on_launch: true
-          extra_vars:
-            ao_webhook_path: "{{ ao_webhook_path | default('ee-definition-pushed') }}"
+          # Controller wants extra variables as a YAML or JSON string.
+          extra_vars: "ao_webhook_path: {{ ao_webhook_path | default('ee-definition-pushed') }}"
         - name: "{{ ee_prep_job_template }}"
           description: Installs podman and ansible-builder on the execution environment build host.
           job_type: run
