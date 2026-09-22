@@ -366,9 +366,9 @@
         method: POST
         headers: "{{ _api_headers }}"
         body_format: json
-        body:
-          id: "{{ item.1 | int }}"
-        status_code: [200, 201, 204, 400]
+        # The ID has to stay an integer, so build the body as a dict.
+        body: "{{ {'id': item.1 | int} }}"
+        status_code: [200, 201, 204]
         validate_certs: "{{ aap_validate_certs }}"
       loop: "{{ _jt_lookup.results | subelements('item.credentials') }}"
       loop_control:
