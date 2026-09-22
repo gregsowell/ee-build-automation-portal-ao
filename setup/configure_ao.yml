@@ -15,7 +15,7 @@
   vars:
     ao_validate_certs: false
     ao_username: admin
-    ao_project_name: Default
+    ao_project_name: default
     # The AAP integration and credential the workflow's job steps run through.
     # ao_setup.yml from the ao-random repository creates these.
     ao_aap_integration_name: Demo AAP
@@ -66,7 +66,8 @@
     - name: Find the project
       ansible.builtin.set_fact:
         _project: >-
-          {{ _projects.json.resources | selectattr('name', 'equalto', ao_project_name)
+          {{ _projects.json.resources
+             | selectattr('name', 'match', '(?i)^' ~ ao_project_name ~ '$')
              | list | first | default({}) }}
 
     - name: Stop when the project is missing
