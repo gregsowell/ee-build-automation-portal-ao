@@ -350,6 +350,18 @@
         "x": 2150,
         "y": 660
       }
+    },
+    {
+      "id": "check_gave_up",
+      "type": "condition",
+      "name": "Gave Up Without A Working Build",
+      "parameters": {
+        "condition": "${build_ee.artifacts.ee_build_result} != 'success'"
+      },
+      "position": {
+        "x": 360,
+        "y": -90
+      }
     }
   ],
   "edges": [
@@ -379,11 +391,6 @@
       "from": "check_ai_recommends_retry",
       "to": "notify_failure",
       "from_port": "false"
-    },
-    {
-      "from": "loop_until_built",
-      "to": "notify_failure",
-      "from_port": "complete"
     },
     {
       "from": "check_build_succeeded",
@@ -419,6 +426,16 @@
       "from": "apply_ai_fix",
       "to": "loop_until_built",
       "to_port": "iterate"
+    },
+    {
+      "from": "loop_until_built",
+      "to": "check_gave_up",
+      "from_port": "complete"
+    },
+    {
+      "from": "check_gave_up",
+      "to": "notify_failure",
+      "from_port": "true"
     }
   ]
 }
