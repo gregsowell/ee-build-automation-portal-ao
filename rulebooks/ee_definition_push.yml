@@ -21,7 +21,7 @@
       condition: >-
         event.payload.ref == "refs/heads/main" and
         event.payload.head_commit is defined and
-        event.payload.head_commit.message is not search("[skip-ee-build]")
+        event.payload.head_commit.message is not search("skip-ee-build")
       action:
         run_job_template:
           name: "{{ ee_forward_job_template | default('EE Build | Forward Event to AO') }}"
