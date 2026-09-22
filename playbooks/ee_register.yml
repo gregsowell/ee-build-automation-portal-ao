@@ -92,7 +92,10 @@
     - name: Talk to automation controller
       delegate_to: localhost
       vars:
-        _api: "{{ ee_aap_url | regex_replace('/$', '') }}/api/controller/v2"
+        # The AAP credential injects a bare hostname, so add the scheme.
+        _api: >-
+          {{ (ee_aap_url if ee_aap_url is match('https?://') else 'https://' ~ ee_aap_url)
+             | regex_replace('/$', '') }}/api/controller/v2
         _headers: >-
           {{ {'Authorization': 'Bearer ' ~ ee_aap_token}
              if ee_aap_token | default('', true) | length > 0 else {} }}
