@@ -59,7 +59,7 @@
     - name: Print the end of the build log
       when: ee_build_log_tail | length > 0
       ansible.builtin.debug:
-        msg: "{{ ee_build_log_tail.split('\n') | last(40) }}"
+        msg: "{{ ee_build_log_tail.split('\n')[-40:] }}"
 
     - name: Post the summary to the chat webhook
       when: ee_notify_webhook_url | length > 0
