@@ -55,18 +55,31 @@ auth:
         clientSecret: ${GITHUB_CLIENT_SECRET}
 ```
 
-Put the values in the appliance's environment file rather than in the YAML, so
-the config itself holds no secrets. Then restart:
+Keep the existing `auth.providers.rhaap` block: people still sign in to the
+portal with AAP, and GitHub is only there so the builder can push as them.
+Substitute the real values, or point them at the appliance's environment file.
+Then restart:
 
 ```bash
 sudo ansible-portal restart
 sudo ansible-portal status
 ```
 
-Check the generated `/etc/portal/configs/app-config/app-config.yaml` for the
-keys the appliance already sets, and match its structure if it differs from the
-snippet above. The cloud-init reference for the appliance also accepts
-`integrations.github.*` at first boot.
+Check it took:
+
+```bash
+curl -sk -o /dev/null -w '%{http_code}
+' https://<portal-fqdn>/api/auth/github/handler/frame
+```
+
+`404` means the provider is not registered. `400` means it is (the handler was
+called without an authorization code). Give the portal a minute after a
+restart: it answers 404 until the auth plugin finishes initializing, and
+`journalctl -u portal` prints `Configuring auth provider: github` when it is
+ready.
+
+The cloud-init reference for the appliance also accepts `integrations.github.*`
+at first boot.
 
 ## 4. Build a definition
 
