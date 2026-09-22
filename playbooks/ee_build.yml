@@ -46,6 +46,19 @@
     ee_base_registry_username: ""
     ee_base_registry_password: ""
     ee_registry_tls_verify: false
+    # Private automation hub galaxy endpoint, injected by the same credential.
+    # Leave empty to let ansible-galaxy use its own defaults.
+    ee_galaxy_url: ""
+    ee_galaxy_token: ""
+    ee_galaxy_validate_certs: false
+    # Hub repositories to search, in order. galaxy.ansible.com is appended
+    # last unless ee_galaxy_public_fallback is false.
+    ee_galaxy_repositories:
+      - rh-certified
+      - validated
+      - published
+      - community
+    ee_galaxy_public_fallback: true
 
   tasks:
     - name: Check the required variables
@@ -200,22 +213,82 @@
     - name: Build the image with ansible-builder
       when: _definition_parse is not failed
       block:
-        - name: Run ansible-builder build
+        - name: Generate the build context
           ansible.builtin.shell:
             cmd: >-
               set -o pipefail;
-              ansible-builder build
+              ansible-builder create
               -f {{ _definition_file | quote }}
               -c {{ (_context_dir ~ '/context') | quote }}
-              -t {{ ('localhost/' ~ _ee_name ~ ':' ~ _ee_tag) | quote }}
-              --container-runtime {{ ee_container_runtime }}
               -v {{ ee_build_verbosity }}
               2>&1 | tee {{ (_build_dir ~ '/build.log') | quote }}
             chdir: "{{ _context_dir }}"
             executable: /bin/bash
-          register: _build
-          changed_when: _build.rc == 0
+          register: _create
+          changed_when: _create.rc == 0
           failed_when: false
+
+        # ansible-builder only honours the definition's ansible_config key for
+        # version 1 files, so the galaxy configuration goes into the context and
+        # the Containerfile is pointed at it. It lands in the galaxy build stage
+        # only, so the token is not in the finished image.
+        - name: Configure the build to pull collections from the hub
+          when:
+            - _create.rc == 0
+            - ee_galaxy_url | length > 0
+          block:
+            - name: Write the galaxy configuration into the build context
+              ansible.builtin.copy:
+                content: |
+                  [galaxy]
+                  server_list = {{ (ee_galaxy_repositories
+                                    | map('regex_replace', '-', '_')
+                                    | map('regex_replace', '^', 'hub_') | list
+                                    + (['release_galaxy'] if ee_galaxy_public_fallback | bool else []))
+                                   | join(', ') }}
+                  {% for repo in ee_galaxy_repositories %}
+
+                  [galaxy_server.hub_{{ repo | regex_replace('-', '_') }}]
+                  url = {{ ee_galaxy_url | regex_replace('/$', '') }}/content/{{ repo }}/
+                  token = {{ ee_galaxy_token }}
+                  validate_certs = {{ ee_galaxy_validate_certs | bool }}
+                  {% endfor %}
+                  {% if ee_galaxy_public_fallback | bool %}
+
+                  [galaxy_server.release_galaxy]
+                  url = https://galaxy.ansible.com/
+                  {% endif %}
+                dest: "{{ _context_dir }}/context/_build/ansible.cfg"
+                mode: "0600"
+              no_log: true
+
+            - name: Point the galaxy build stage at that configuration
+              ansible.builtin.replace:
+                path: "{{ _context_dir }}/context/Containerfile"
+                regexp: '^(RUN\s+(?:[A-Z_]+=\S+\s+)*ansible-galaxy\s+(?:role|collection)\s+install.*)$'
+                replace: |-
+                  COPY _build/ansible.cfg /etc/ansible/ansible.cfg
+                  \1
+
+        - name: Build the image
+          when: _create.rc == 0
+          ansible.builtin.shell:
+            cmd: >-
+              set -o pipefail;
+              {{ ee_container_runtime }} build
+              -f {{ (_context_dir ~ '/context/Containerfile') | quote }}
+              -t {{ ('localhost/' ~ _ee_name ~ ':' ~ _ee_tag) | quote }}
+              {{ (_context_dir ~ '/context') | quote }}
+              2>&1 | tee -a {{ (_build_dir ~ '/build.log') | quote }}
+            chdir: "{{ _context_dir }}"
+            executable: /bin/bash
+          register: _image_build
+          changed_when: _image_build.rc == 0
+          failed_when: false
+
+        - name: Keep whichever step failed
+          ansible.builtin.set_fact:
+            _build: "{{ _create if _create.rc != 0 else _image_build }}"
 
         - name: Read the tail of the build log
           ansible.builtin.command:

@@ -108,6 +108,13 @@
                 type: string
                 label: Base image registry password or token
                 secret: true
+              - id: ee_galaxy_url
+                type: string
+                label: Private automation hub galaxy URL
+              - id: ee_galaxy_token
+                type: string
+                label: Hub galaxy API token
+                secret: true
             required:
               - ee_hub_host
               - ee_hub_username
@@ -120,6 +127,8 @@
               ee_base_registry_host: "{% raw %}{{ ee_base_registry_host }}{% endraw %}"
               ee_base_registry_username: "{% raw %}{{ ee_base_registry_username }}{% endraw %}"
               ee_base_registry_password: "{% raw %}{{ ee_base_registry_password }}{% endraw %}"
+              ee_galaxy_url: "{% raw %}{{ ee_galaxy_url }}{% endraw %}"
+              ee_galaxy_token: "{% raw %}{{ ee_galaxy_token }}{% endraw %}"
       ansible.builtin.include_tasks: tasks/upsert.yml
 
     - name: Keep the registry credential type ID
@@ -177,6 +186,8 @@
             ee_base_registry_host: "{{ ee_base_registry_host | default('registry.redhat.io') }}"
             ee_base_registry_username: "{{ ee_base_registry_username | default('') }}"
             ee_base_registry_password: "{{ ee_base_registry_password | default('') }}"
+            ee_galaxy_url: "{{ ee_galaxy_url | default('') }}"
+            ee_galaxy_token: "{{ ee_galaxy_token | default('') }}"
       ansible.builtin.include_tasks: tasks/upsert.yml
       no_log: true
 
