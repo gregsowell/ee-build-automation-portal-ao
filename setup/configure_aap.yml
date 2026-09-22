@@ -23,8 +23,6 @@
     ee_project_branch: main
     ee_registry_credential_type: EE Build Registries
     ee_registry_credential_name: EE Build Registries
-    ee_galaxy_credential_type: EE Build Galaxy
-    ee_galaxy_credential_name: EE Build Galaxy
     ao_credential_type: Automation Orchestrator Service Account
     ao_credential_name: Automation Orchestrator Service Account
     ee_build_job_template: EE Build | Build Image
@@ -128,36 +126,6 @@
       ansible.builtin.set_fact:
         _registry_type_id: "{{ upsert_id }}"
 
-    - name: Create the galaxy credential type
-      vars:
-        upsert_api: "{{ _controller_api }}"
-        upsert_path: credential_types
-        upsert_body:
-          name: "{{ ee_galaxy_credential_type }}"
-          description: Private automation hub galaxy endpoint and token used when building.
-          kind: cloud
-          inputs:
-            fields:
-              - id: ee_galaxy_url
-                type: string
-                label: Private automation hub galaxy URL
-              - id: ee_galaxy_token
-                type: string
-                label: Hub galaxy API token
-                secret: true
-            required:
-              - ee_galaxy_url
-              - ee_galaxy_token
-          injectors:
-            extra_vars:
-              ee_galaxy_url: "{% raw %}{{ ee_galaxy_url }}{% endraw %}"
-              ee_galaxy_token: "{% raw %}{{ ee_galaxy_token }}{% endraw %}"
-      ansible.builtin.include_tasks: tasks/upsert.yml
-
-    - name: Keep the galaxy credential type ID
-      ansible.builtin.set_fact:
-        _galaxy_type_id: "{{ upsert_id }}"
-
     - name: Create the orchestrator credential type
       vars:
         upsert_api: "{{ _controller_api }}"
@@ -215,24 +183,6 @@
     - name: Keep the registry credential ID
       ansible.builtin.set_fact:
         _registry_credential_id: "{{ upsert_id }}"
-
-    - name: Create the galaxy credential
-      vars:
-        upsert_api: "{{ _controller_api }}"
-        upsert_path: credentials
-        upsert_body:
-          name: "{{ ee_galaxy_credential_name }}"
-          organization: "{{ _org_id | int }}"
-          credential_type: "{{ _galaxy_type_id | int }}"
-          inputs:
-            ee_galaxy_url: "{{ ee_galaxy_url | default('') }}"
-            ee_galaxy_token: "{{ ee_galaxy_token | default('') }}"
-      ansible.builtin.include_tasks: tasks/upsert.yml
-      no_log: true
-
-    - name: Keep the galaxy credential ID
-      ansible.builtin.set_fact:
-        _galaxy_credential_id: "{{ upsert_id }}"
 
     - name: Create the orchestrator credential
       vars:
@@ -349,6 +299,7 @@
           ask_limit_on_launch: true
           timeout: 7200
           verbosity: 0
+          extra_vars: "ee_galaxy_url: {{ ee_galaxy_url | default('') }}"
         - name: "{{ ee_register_job_template }}"
           description: Pushes a built image to private automation hub and registers it in AAP.
           job_type: run
@@ -402,7 +353,7 @@
       ansible.builtin.include_tasks: tasks/set_job_template_credentials.yml
       loop:
         - name: "{{ ee_build_job_template }}"
-          credentials: "{{ [_machine_credential_id, _registry_credential_id, _galaxy_credential_id] }}"
+          credentials: "{{ [_machine_credential_id, _registry_credential_id] }}"
         - name: "{{ ee_register_job_template }}"
           credentials: >-
             {{ [_machine_credential_id, _registry_credential_id]
