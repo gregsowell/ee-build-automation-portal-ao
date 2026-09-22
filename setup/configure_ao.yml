@@ -26,6 +26,9 @@
     ao_service_account_name: ee-build-eda
     # Issue a new client secret even when the service account already exists.
     ao_rotate_credential: false
+    # Where a newly issued client ID and secret are written. The secret is shown
+    # once by the orchestrator, so it is saved rather than printed.
+    ao_credential_out_file: ~/ao-service-account.yml
     ao_publish: true
 
   tasks:
@@ -156,6 +159,16 @@
       register: _sa_credential
       when: not _service_account or ao_rotate_credential | bool
 
+    - name: Save the new service account credential to a file
+      ansible.builtin.copy:
+        content: |
+          ao_client_id: "{{ _sa_credential.json.identifier }}"
+          ao_client_secret: "{{ _sa_credential.json.client_secret }}"
+        dest: "{{ ao_credential_out_file }}"
+        mode: "0600"
+      when: _sa_credential.json is defined
+      no_log: true
+
     - name: Give the service account permission to run workflows
       ansible.builtin.uri:
         url: "{{ _ao_api }}/projects/{{ _project.id }}/roles?limit=100"
@@ -168,10 +181,18 @@
       ansible.builtin.set_fact:
         _run_role: >-
           {{ (_roles.json.resources | default([]))
-             | selectattr('permissions', 'defined')
-             | selectattr('permissions', 'contains', 'execution:run')
+             | selectattr('policies', 'defined')
+             | selectattr('policies', 'contains', 'execution:run')
              | list | first | default({}) }}
       failed_when: false
+
+    - name: List the roles when none of them can run executions
+      ansible.builtin.debug:
+        msg: >-
+          No role carries the execution:run policy, so the service account was not
+          given one. Grant it by hand in the orchestrator. Roles seen:
+          {{ (_roles.json.resources | default([])) | map(attribute='name') | join(', ') }}
+      when: _run_role | length == 0
 
     - name: Assign that role to the service account
       ansible.builtin.uri:
@@ -180,9 +201,9 @@
         headers: "{{ _ao_headers }}"
         body_format: json
         body:
-          role_id: "{{ _run_role.id }}"
-          subject_type: service_account
-          subject_id: "{{ _service_account_id }}"
+          role_name: "{{ _run_role.name }}"
+          principal_id: "{{ _service_account_id }}"
+          project_id: "{{ _project.id }}"
         status_code: [200, 201, 409]
         validate_certs: "{{ ao_validate_certs }}"
       when: _run_role | length > 0
@@ -213,7 +234,7 @@
           {{ (_workflow_triggers | default([])) + [
                trigger | combine({'parameters': trigger.parameters | combine({
                  'webhook_path': ao_webhook_path,
-                 'authorized_service_accounts': [_service_account_id]})})
+                 'authorized_service_account_ids': [_service_account_id]})})
                if trigger.type == 'eda_trigger' else trigger ] }}
       loop: "{{ _workflow_source.triggers }}"
       loop_control:
@@ -323,10 +344,8 @@
           - "EDA trigger endpoint: {{ ao_url | regex_replace('/$', '') }}/api/v1/webhooks/eda/{{ ao_webhook_path }}"
           - "Service account: {{ ao_service_account_name }} ({{ _service_account_id }})"
           - >-
-            {{ 'Client ID: ' ~ _sa_credential.json.identifier ~ ' - put it in secrets.yml as ao_client_id'
-               if _sa_credential.changed | default(false)
+            {{ 'Client ID and secret written to ' ~ ao_credential_out_file
+               ~ ' - copy both into secrets.yml'
+               if _sa_credential.json is defined
                else 'Service account credential unchanged. Set ao_rotate_credential=true to issue a new secret.' }}
-          - >-
-            {{ 'Client secret (shown once): ' ~ _sa_credential.json.client_secret
-               if _sa_credential.changed | default(false) else '' }}
           - "Then rerun setup/configure_aap.yml so the AAP credential holds the client ID and secret."

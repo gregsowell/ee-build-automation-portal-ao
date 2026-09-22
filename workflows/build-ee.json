@@ -9,6 +9,7 @@
       "name": "EDA: EE definition pushed",
       "parameters": {
         "webhook_path": "ee-definition-pushed",
+        "authorized_service_account_ids": [],
         "input_schema": {
           "type": "object",
           "$schema": "http://json-schema.org/draft-07/schema#",
