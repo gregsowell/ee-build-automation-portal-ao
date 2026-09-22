@@ -1,0 +1,18 @@
+---
+# Pulls a Red Hat certified collection, which comes from private automation hub
+# rather than galaxy.ansible.com. Use it to prove the hub is being searched
+# first: the build log shows the download coming from the hub's rh-certified
+# repository.
+version: 3
+
+images:
+  base_image:
+    name: registry.redhat.io/ansible-automation-platform-27/ee-minimal-rhel9:2.20
+
+dependencies:
+  galaxy:
+    collections:
+      - name: ansible.hub
+
+options:
+  package_manager_path: /usr/bin/microdnf

@@ -50,6 +50,10 @@
     # Leave empty to let ansible-galaxy use its own defaults.
     ee_galaxy_url: ""
     ee_galaxy_token: ""
+    # A hub galaxy API token is not accepted by every deployment; the hub
+    # account works everywhere, so it is the default.
+    ee_galaxy_username: "{{ ee_hub_username | default('') }}"
+    ee_galaxy_password: "{{ ee_hub_password | default('') }}"
     ee_galaxy_validate_certs: false
     # Hub repositories to search, in order. galaxy.ansible.com is appended
     # last unless ee_galaxy_public_fallback is false.
@@ -250,7 +254,12 @@
 
                   [galaxy_server.hub_{{ repo | regex_replace('-', '_') }}]
                   url = {{ ee_galaxy_url | regex_replace('/$', '') }}/content/{{ repo }}/
+                  {% if ee_galaxy_token | length > 0 %}
                   token = {{ ee_galaxy_token }}
+                  {% else %}
+                  username = {{ ee_galaxy_username }}
+                  password = {{ ee_galaxy_password }}
+                  {% endif %}
                   validate_certs = {{ ee_galaxy_validate_certs | bool }}
                   {% endfor %}
                   {% if ee_galaxy_public_fallback | bool %}
