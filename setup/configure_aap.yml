@@ -432,7 +432,7 @@
             auth_type: hmac
             secret: "{{ github_hmac_secret }}"
             hash_algorithm: sha256
-            header_key: "{{ eda_hmac_header }}"
+            http_header_key: "{{ eda_hmac_header }}"
             signature_encoding: "{{ eda_hmac_format }}"
             signature_prefix: "{{ eda_hmac_prefix }}"
       ansible.builtin.include_tasks: tasks/upsert.yml
