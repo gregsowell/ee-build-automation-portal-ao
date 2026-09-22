@@ -1,0 +1,20 @@
+---
+# A small definition that builds. Copy it into the EE definitions repository to
+# test the happy path of the build chain.
+version: 3
+
+images:
+  base_image:
+    name: registry.redhat.io/ansible-automation-platform-25/ee-minimal-rhel9:latest
+
+dependencies:
+  galaxy:
+    collections:
+      - name: ansible.utils
+  python:
+    - jmespath
+  system:
+    - git-core [platform:rpm]
+
+options:
+  package_manager_path: /usr/bin/microdnf

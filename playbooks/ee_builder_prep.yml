@@ -1,0 +1,58 @@
+---
+# Prepare a RHEL host to build execution environments with ansible-builder.
+#
+# Run once against the build host (job template "EE Build | Prep Builder Host").
+# Inventory: any inventory holding the build host. Credential: a machine
+# credential that can escalate to root.
+- name: Prepare the execution environment build host
+  hosts: "{{ ee_build_host | default('ee-builder') }}"
+  gather_facts: true
+  become: true
+
+  vars:
+    ee_builder_packages:
+      - podman
+      - buildah
+      - skopeo
+      - git
+      - python3
+      - python3-pip
+    ee_builder_pip_packages:
+      - ansible-builder
+    # Where ee_build.yml clones definitions and writes build logs.
+    ee_workdir_base: /var/tmp/ee-builds
+
+  tasks:
+    - name: Install the container build tooling
+      ansible.builtin.dnf:
+        name: "{{ ee_builder_packages }}"
+        state: present
+
+    - name: Install ansible-builder
+      ansible.builtin.pip:
+        name: "{{ ee_builder_pip_packages }}"
+        state: present
+        extra_args: --upgrade
+
+    - name: Create the build working directory
+      ansible.builtin.file:
+        path: "{{ ee_workdir_base }}"
+        state: directory
+        mode: "0755"
+
+    - name: Read the ansible-builder version
+      ansible.builtin.command: ansible-builder --version
+      register: _builder_version
+      changed_when: false
+
+    - name: Read the podman version
+      ansible.builtin.command: podman --version
+      register: _podman_version
+      changed_when: false
+
+    - name: Show what is installed
+      ansible.builtin.debug:
+        msg:
+          - "ansible-builder: {{ _builder_version.stdout }}"
+          - "podman: {{ _podman_version.stdout }}"
+          - "build directory: {{ ee_workdir_base }}"

@@ -1,0 +1,331 @@
+---
+# Import the Build-EE workflow into automation orchestrator, give it an
+# Event-Driven Ansible trigger, and create the service account that EDA uses to
+# call that trigger.
+#
+#   ansible-playbook setup/configure_ao.yml -e @secrets.yml
+#
+# The orchestrator admin password is only needed here. At run time the chain
+# authenticates with the service account created below.
+- name: Configure automation orchestrator for EE builds
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    ao_validate_certs: false
+    ao_username: admin
+    ao_project_name: Default
+    # The AAP integration and credential the workflow's job steps run through.
+    # ao_setup.yml from the ao-random repository creates these.
+    ao_aap_integration_name: Demo AAP
+    ao_aap_credential_name: Demo AAP
+    ao_workflow_file: ../workflows/build-ee.json
+    ao_workflow_name: Build-EE
+    ao_webhook_path: ee-definition-pushed
+    ao_service_account_name: ee-build-eda
+    # Issue a new client secret even when the service account already exists.
+    ao_rotate_credential: false
+    ao_publish: true
+
+  tasks:
+    - name: Check the required variables
+      ansible.builtin.assert:
+        that:
+          - ao_url is defined and ao_url | length > 0
+          - ao_password is defined and ao_password | length > 0
+        fail_msg: Set ao_url and ao_password in secrets.yml.
+
+    - name: Log in to automation orchestrator
+      ansible.builtin.uri:
+        url: "{{ ao_url | regex_replace('/$', '') }}/api/v1/auth/login"
+        method: POST
+        body_format: json
+        body:
+          username: "{{ ao_username }}"
+          password: "{{ ao_password }}"
+        status_code: [200, 201]
+        validate_certs: "{{ ao_validate_certs }}"
+      register: _login
+      no_log: true
+
+    - name: Set the API root and headers
+      ansible.builtin.set_fact:
+        _ao_api: "{{ ao_url | regex_replace('/$', '') }}/api/v1"
+        _ao_headers:
+          Authorization: "Bearer {{ _login.json.access_token }}"
+      no_log: true
+
+    - name: List the projects
+      ansible.builtin.uri:
+        url: "{{ _ao_api }}/projects?limit=100"
+        headers: "{{ _ao_headers }}"
+        validate_certs: "{{ ao_validate_certs }}"
+      register: _projects
+
+    - name: Find the project
+      ansible.builtin.set_fact:
+        _project: >-
+          {{ _projects.json.resources | selectattr('name', 'equalto', ao_project_name)
+             | list | first | default({}) }}
+
+    - name: Stop when the project is missing
+      ansible.builtin.fail:
+        msg: >-
+          No project named {{ ao_project_name }}. Available:
+          {{ _projects.json.resources | map(attribute='name') | join(', ') }}
+      when: not _project
+
+    - name: List the integrations
+      ansible.builtin.uri:
+        url: "{{ _ao_api }}/integrations?limit=100"
+        headers: "{{ _ao_headers }}"
+        validate_certs: "{{ ao_validate_certs }}"
+      register: _integrations
+
+    - name: List the credentials
+      ansible.builtin.uri:
+        url: "{{ _ao_api }}/credentials?limit=100"
+        headers: "{{ _ao_headers }}"
+        validate_certs: "{{ ao_validate_certs }}"
+      register: _credentials
+
+    - name: Find the AAP integration and credential
+      ansible.builtin.set_fact:
+        _integration_id: >-
+          {{ (_integrations.json.resources | selectattr('name', 'equalto', ao_aap_integration_name)
+              | list | first | default({})).id | default('') }}
+        _credential_id: >-
+          {{ (_credentials.json.resources | selectattr('name', 'equalto', ao_aap_credential_name)
+              | list | first | default({})).id | default('') }}
+
+    - name: Stop when the AAP integration or credential is missing
+      ansible.builtin.fail:
+        msg: >-
+          Automation orchestrator needs an AAP integration named
+          '{{ ao_aap_integration_name }}' and a credential named
+          '{{ ao_aap_credential_name }}'. Create them in the orchestrator, or run
+          ao_setup.yml from the ao-random repository first.
+      when: _integration_id | length == 0 or _credential_id | length == 0
+
+    # ------------------------------------------------------- service account
+    - name: List the service accounts
+      ansible.builtin.uri:
+        url: "{{ _ao_api }}/service_accounts?limit=100"
+        headers: "{{ _ao_headers }}"
+        validate_certs: "{{ ao_validate_certs }}"
+      register: _service_accounts
+
+    - name: Look for the EDA service account
+      ansible.builtin.set_fact:
+        _service_account: >-
+          {{ _service_accounts.json.resources | default(_service_accounts.json.items | default([]))
+             | selectattr('name', 'equalto', ao_service_account_name)
+             | list | first | default({}) }}
+
+    - name: Create the EDA service account
+      ansible.builtin.uri:
+        url: "{{ _ao_api }}/service_accounts"
+        method: POST
+        headers: "{{ _ao_headers }}"
+        body_format: json
+        body:
+          name: "{{ ao_service_account_name }}"
+          description: Used by Event-Driven Ansible to start the Build-EE workflow.
+          project_id: "{{ _project.id }}"
+        status_code: [200, 201]
+        validate_certs: "{{ ao_validate_certs }}"
+      register: _sa_created
+      when: not _service_account
+
+    - name: Keep the service account ID
+      ansible.builtin.set_fact:
+        _service_account_id: "{{ _service_account.id if _service_account else _sa_created.json.id }}"
+
+    - name: Issue a client credential for the service account
+      ansible.builtin.uri:
+        url: "{{ _ao_api }}/service_accounts/{{ _service_account_id }}/credentials"
+        method: POST
+        headers: "{{ _ao_headers }}"
+        body_format: json
+        body:
+          credential_type: client_credentials
+        status_code: [200, 201]
+        validate_certs: "{{ ao_validate_certs }}"
+      register: _sa_credential
+      when: not _service_account or ao_rotate_credential | bool
+
+    - name: Give the service account permission to run workflows
+      ansible.builtin.uri:
+        url: "{{ _ao_api }}/projects/{{ _project.id }}/roles?limit=100"
+        headers: "{{ _ao_headers }}"
+        validate_certs: "{{ ao_validate_certs }}"
+      register: _roles
+      failed_when: false
+
+    - name: Work out which role can run executions
+      ansible.builtin.set_fact:
+        _run_role: >-
+          {{ (_roles.json.resources | default([]))
+             | selectattr('permissions', 'defined')
+             | selectattr('permissions', 'contains', 'execution:run')
+             | list | first | default({}) }}
+      failed_when: false
+
+    - name: Assign that role to the service account
+      ansible.builtin.uri:
+        url: "{{ _ao_api }}/projects/{{ _project.id }}/role_assignments"
+        method: POST
+        headers: "{{ _ao_headers }}"
+        body_format: json
+        body:
+          role_id: "{{ _run_role.id }}"
+          subject_type: service_account
+          subject_id: "{{ _service_account_id }}"
+        status_code: [200, 201, 409]
+        validate_certs: "{{ ao_validate_certs }}"
+      when: _run_role | length > 0
+      register: _role_assignment
+      failed_when: false
+
+    # ------------------------------------------------------------- workflow
+    - name: Read the workflow definition
+      ansible.builtin.set_fact:
+        _workflow_source: "{{ lookup('ansible.builtin.file', ao_workflow_file) | from_json }}"
+
+    - name: Point every AAP step at this orchestrator's integration and credential
+      ansible.builtin.set_fact:
+        _workflow_nodes: >-
+          {{ (_workflow_nodes | default([])) + [
+               (node | combine({'parameters': node.parameters | combine({
+                  'credential_id': _credential_id,
+                  'integration_id': _integration_id})}))
+               if node.type in ['aap_job_template', 'aap_workflow_job_template'] else node ] }}
+      loop: "{{ _workflow_source.nodes }}"
+      loop_control:
+        loop_var: node
+        label: "{{ node.name | default(node.id) }}"
+
+    - name: Set the webhook path and authorize the service account on the trigger
+      ansible.builtin.set_fact:
+        _workflow_triggers: >-
+          {{ (_workflow_triggers | default([])) + [
+               trigger | combine({'parameters': trigger.parameters | combine({
+                 'webhook_path': ao_webhook_path,
+                 'authorized_service_accounts': [_service_account_id]})})
+               if trigger.type == 'eda_trigger' else trigger ] }}
+      loop: "{{ _workflow_source.triggers }}"
+      loop_control:
+        loop_var: trigger
+        label: "{{ trigger.name | default(trigger.id) }}"
+
+    - name: Build the definition to import
+      ansible.builtin.set_fact:
+        _workflow_definition: >-
+          {{ _workflow_source | combine({
+               'name': ao_workflow_name,
+               'nodes': _workflow_nodes,
+               'triggers': _workflow_triggers}) }}
+
+    - name: List the workflows
+      ansible.builtin.uri:
+        url: "{{ _ao_api }}/workflows?limit=100"
+        headers: "{{ _ao_headers }}"
+        validate_certs: "{{ ao_validate_certs }}"
+      register: _workflows
+
+    - name: Look for an existing {{ ao_workflow_name }}
+      ansible.builtin.set_fact:
+        _existing_workflow: >-
+          {{ _workflows.json.resources | selectattr('name', 'equalto', ao_workflow_name)
+             | list | first | default({}) }}
+
+    - name: Import {{ ao_workflow_name }}
+      ansible.builtin.uri:
+        url: "{{ _ao_api }}/workflows"
+        method: POST
+        headers: "{{ _ao_headers }}"
+        body_format: json
+        body:
+          name: "{{ ao_workflow_name }}"
+          description: "{{ _workflow_definition.description }}"
+          project_id: "{{ _project.id }}"
+          is_import: true
+          workflow_definition: "{{ _workflow_definition }}"
+        status_code: [200, 201]
+        validate_certs: "{{ ao_validate_certs }}"
+      register: _workflow_created
+      when: not _existing_workflow
+
+    - name: Update {{ ao_workflow_name }} with a new draft version
+      ansible.builtin.uri:
+        url: "{{ _ao_api }}/workflows/{{ _existing_workflow.id }}"
+        method: PATCH
+        headers: "{{ _ao_headers }}"
+        body_format: json
+        body:
+          workflow_definition: "{{ _workflow_definition }}"
+        status_code: [200, 201]
+        validate_certs: "{{ ao_validate_certs }}"
+      register: _workflow_updated
+      when: _existing_workflow | length > 0
+
+    - name: Keep the workflow ID
+      ansible.builtin.set_fact:
+        _workflow_id: >-
+          {{ _existing_workflow.id if _existing_workflow else _workflow_created.json.id }}
+
+    - name: Publish the workflow
+      when: ao_publish | bool
+      block:
+        - name: List the versions
+          ansible.builtin.uri:
+            url: "{{ _ao_api }}/workflows/{{ _workflow_id }}/versions?limit=100"
+            headers: "{{ _ao_headers }}"
+            validate_certs: "{{ ao_validate_certs }}"
+          register: _versions
+
+        - name: Publish the newest version
+          ansible.builtin.uri:
+            url: "{{ _ao_api }}/workflows/{{ _workflow_id }}/versions/{{ _versions.json.resources | map(attribute='version') | max }}/publish"
+            method: POST
+            headers: "{{ _ao_headers }}"
+            body_format: json
+            body:
+              publish_name: Published by configure_ao.yml
+            status_code: [200, 201]
+            validate_certs: "{{ ao_validate_certs }}"
+      rescue:
+        - name: Warn that the workflow is still a draft
+          ansible.builtin.debug:
+            msg: >-
+              {{ ao_workflow_name }} was saved but not published:
+              {{ ansible_failed_result.json | default(ansible_failed_result.msg) }}
+              The EDA trigger only accepts events once the workflow is published.
+
+    - name: Read the workflow back
+      ansible.builtin.uri:
+        url: "{{ _ao_api }}/workflows/{{ _workflow_id }}"
+        headers: "{{ _ao_headers }}"
+        validate_certs: "{{ ao_validate_certs }}"
+      register: _workflow_read
+
+    - name: Show the trigger as the orchestrator stored it
+      ansible.builtin.debug:
+        msg: >-
+          {{ (_workflow_read.json.workflow_definition | default({})).triggers | default('not returned') }}
+
+    - name: Show what to do next
+      ansible.builtin.debug:
+        msg:
+          - "Workflow: {{ ao_workflow_name }} ({{ _workflow_id }})"
+          - "EDA trigger endpoint: {{ ao_url | regex_replace('/$', '') }}/api/v1/webhooks/eda/{{ ao_webhook_path }}"
+          - "Service account: {{ ao_service_account_name }} ({{ _service_account_id }})"
+          - >-
+            {{ 'Client ID: ' ~ _sa_credential.json.identifier ~ ' - put it in secrets.yml as ao_client_id'
+               if _sa_credential.changed | default(false)
+               else 'Service account credential unchanged. Set ao_rotate_credential=true to issue a new secret.' }}
+          - >-
+            {{ 'Client secret (shown once): ' ~ _sa_credential.json.client_secret
+               if _sa_credential.changed | default(false) else '' }}
+          - "Then rerun setup/configure_aap.yml so the AAP credential holds the client ID and secret."

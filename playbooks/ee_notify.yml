@@ -1,0 +1,81 @@
+---
+# Report the outcome of an execution environment build.
+#
+# Job template: "EE Build | Notify"  (prompt on launch: extra variables)
+# Inventory:    any inventory with localhost. Credentials: none.
+#
+# The orchestrator calls this when the build loop gives up, when the AI
+# declines to retry, or when a human rejects an AI-modified definition.
+# With ee_notify_webhook_url set it also posts the summary to a chat webhook
+# (Slack or Mattermost style). Without it, the summary is only in the job log.
+- name: Report an execution environment build outcome
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    ee_name: unknown
+    ee_notify_reason: build_failed
+    ee_notify_webhook_url: ""
+    ee_notify_validate_certs: true
+    ee_build_attempt: 0
+    ee_build_log_tail: ""
+    ee_ai_summary: ""
+    ee_ai_root_cause: ""
+    ee_definition_path: ""
+    ee_repo_url: ""
+    ee_git_ref: ""
+    ee_job_url: ""
+    _reason_text:
+      build_failed: The image build failed and the repair loop ran out of attempts.
+      ai_declined: The AI repair step did not recommend another build.
+      rejected: A reviewer rejected the AI-modified definition.
+      needs_review: The proposed fix needs a human because it touches credentials, a registry or the base image.
+      success: The execution environment was built and registered.
+
+  tasks:
+    - name: Build the summary
+      ansible.builtin.set_fact:
+        _summary: |
+          Execution environment: {{ ee_name }}
+          Outcome: {{ _reason_text[ee_notify_reason] | default(ee_notify_reason) }}
+          Definition: {{ ee_definition_path | default('unknown', true) }}
+          Repository: {{ ee_repo_url | default('unknown', true) }} @ {{ ee_git_ref | default('unknown', true) }}
+          Build attempts: {{ ee_build_attempt }}
+          {% if ee_ai_summary | length > 0 %}
+          AI summary: {{ ee_ai_summary }}
+          {% endif %}
+          {% if ee_ai_root_cause | length > 0 %}
+          Root cause: {{ ee_ai_root_cause }}
+          {% endif %}
+          {% if ee_job_url | length > 0 %}
+          Build job: {{ ee_job_url }}
+          {% endif %}
+
+    - name: Print the summary
+      ansible.builtin.debug:
+        msg: "{{ _summary.split('\n') }}"
+
+    - name: Print the end of the build log
+      when: ee_build_log_tail | length > 0
+      ansible.builtin.debug:
+        msg: "{{ ee_build_log_tail.split('\n') | last(40) }}"
+
+    - name: Post the summary to the chat webhook
+      when: ee_notify_webhook_url | length > 0
+      ansible.builtin.uri:
+        url: "{{ ee_notify_webhook_url }}"
+        method: POST
+        body_format: json
+        body:
+          text: "EE build: {{ ee_name }} - {{ _reason_text[ee_notify_reason] | default(ee_notify_reason) }}\n```\n{{ _summary }}\n```"
+        status_code: [200, 201, 202, 204]
+        validate_certs: "{{ ee_notify_validate_certs }}"
+
+    - name: Publish the result for automation orchestrator
+      ansible.builtin.set_stats:
+        aggregate: false
+        per_host: false
+        data:
+          ee_notify_result: sent
+          ee_notify_reason: "{{ ee_notify_reason }}"

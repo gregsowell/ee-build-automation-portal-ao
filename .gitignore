@@ -1,0 +1,7 @@
+# Local secrets - never commit
+secrets.yml
+*secrets.yml
+!setup/secrets.example.yml
+*.retry
+__pycache__/
+.venv/

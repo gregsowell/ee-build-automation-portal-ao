@@ -1,0 +1,240 @@
+---
+# Build one execution environment with ansible-builder.
+#
+# Job template: "EE Build | Build Image"  (prompt on launch: extra variables)
+# Inventory:    the inventory holding the build host, limited to that host
+# Credentials:  a machine credential for the build host
+#               + "EE Build Registries" (custom type, injects the registry logins)
+#
+# This play does NOT fail when the image build fails. The outcome is reported
+# through set_stats as ee_build_result, so the calling automation orchestrator
+# workflow can read the log, repair the definition and try again. The job only
+# fails on infrastructure problems: a missing repository, an unreadable
+# definition, a registry login failure.
+#
+# Required variables
+#   ee_repo_url          Git repository holding the definition (https)
+#   ee_definition_path   Path to the definition file inside that repository
+#
+# Optional variables
+#   ee_git_ref             Branch, tag or commit to build. Default: main
+#   ee_name                EE name. Default: derived from ee_definition_path
+#   ee_definition_override Full YAML to write over the definition before
+#                          building. Used by the AI repair loop. Ignored when
+#                          empty or still an unresolved ${...} reference.
+#   build_attempt          Loop iteration number, used in the image tag
+- name: Build an execution environment image
+  hosts: "{{ ee_build_host | default('ee-builder') }}"
+  gather_facts: false
+
+  vars:
+    ee_git_ref: main
+    ee_definition_override: ""
+    build_attempt: 0
+    ee_workdir_base: /var/tmp/ee-builds
+    ee_build_log_lines: 150
+    ee_container_runtime: podman
+    ee_build_verbosity: 3
+    # Registry logins. Injected by the "EE Build Registries" credential type;
+    # leave unset to skip that login.
+    ee_hub_host: ""
+    ee_hub_username: ""
+    ee_hub_password: ""
+    ee_base_registry_host: registry.redhat.io
+    ee_base_registry_username: ""
+    ee_base_registry_password: ""
+    ee_registry_tls_verify: false
+
+  tasks:
+    - name: Check the required variables
+      ansible.builtin.assert:
+        that:
+          - ee_repo_url | default('', true) | length > 0
+          - ee_definition_path | default('', true) | length > 0
+        fail_msg: >-
+          ee_repo_url and ee_definition_path are required.
+
+    - name: Work out the names and paths for this build
+      vars:
+        _file_stem: "{{ ee_definition_path | basename | splitext | first }}"
+        _parent_dir: "{{ ee_definition_path | dirname | basename }}"
+      ansible.builtin.set_fact:
+        # execution-environment.yml is a generic name, so fall back to the
+        # directory the portal created for the EE.
+        _ee_name: >-
+          {{ ee_name | default(
+               _parent_dir if _file_stem in ['execution-environment', 'ee'] and _parent_dir | length > 0
+               else _file_stem, true) }}
+        _ref_short: "{{ ee_git_ref | default('main', true) | regex_replace('[^A-Za-z0-9]', '-') | truncate(12, true, '') }}"
+
+    - name: Set the build directory and tag
+      ansible.builtin.set_fact:
+        _build_dir: "{{ ee_workdir_base }}/{{ _ee_name }}-{{ _ref_short }}"
+        _ee_tag: "{{ _ref_short }}-a{{ build_attempt }}"
+
+    - name: Make sure the build directory's parent exists
+      ansible.builtin.file:
+        path: "{{ ee_workdir_base }}"
+        state: directory
+        mode: "0755"
+
+    - name: Clone the definition repository at {{ ee_git_ref }}
+      ansible.builtin.git:
+        repo: "{{ ee_repo_url }}"
+        dest: "{{ _build_dir }}"
+        version: "{{ ee_git_ref }}"
+        force: true
+      register: _clone
+
+    - name: Set the definition file path
+      ansible.builtin.set_fact:
+        _definition_file: "{{ _build_dir }}/{{ ee_definition_path }}"
+        _context_dir: "{{ (_build_dir ~ '/' ~ ee_definition_path) | dirname }}"
+
+    - name: Check the definition file exists
+      ansible.builtin.stat:
+        path: "{{ _definition_file }}"
+      register: _definition_stat
+
+    - name: Fail when the definition is missing
+      ansible.builtin.fail:
+        msg: "{{ ee_definition_path }} does not exist in {{ ee_repo_url }} at {{ ee_git_ref }}"
+      when: not _definition_stat.stat.exists
+
+    # An unresolved orchestrator reference arrives as the literal "${...}".
+    - name: Decide whether the AI supplied a replacement definition
+      ansible.builtin.set_fact:
+        _use_override: >-
+          {{ ee_definition_override | default('', true) | trim | length > 0
+             and not (ee_definition_override | trim).startswith('${')
+             and 'null' != (ee_definition_override | trim) }}
+
+    - name: Write the AI-corrected definition over {{ ee_definition_path }}
+      ansible.builtin.copy:
+        content: "{{ ee_definition_override }}"
+        dest: "{{ _definition_file }}"
+        mode: "0644"
+      when: _use_override | bool
+
+    - name: Read the definition being built
+      ansible.builtin.slurp:
+        src: "{{ _definition_file }}"
+      register: _definition_raw
+
+    - name: Keep the definition content
+      ansible.builtin.set_fact:
+        _definition_content: "{{ _definition_raw.content | b64decode }}"
+
+    - name: Check the definition parses as YAML
+      ansible.builtin.set_fact:
+        _definition_parsed: "{{ _definition_content | from_yaml }}"
+      register: _definition_parse
+      ignore_errors: true
+
+    - name: Log in to the private automation hub registry
+      ansible.builtin.command:
+        argv:
+          - podman
+          - login
+          - "--username={{ ee_hub_username }}"
+          - "--password={{ ee_hub_password }}"
+          - "--tls-verify={{ ee_registry_tls_verify | bool | lower }}"
+          - "{{ ee_hub_host }}"
+      when:
+        - ee_hub_host | length > 0
+        - ee_hub_username | length > 0
+      changed_when: false
+      no_log: true
+
+    - name: Log in to the base image registry
+      ansible.builtin.command:
+        argv:
+          - podman
+          - login
+          - "--username={{ ee_base_registry_username }}"
+          - "--password={{ ee_base_registry_password }}"
+          - "{{ ee_base_registry_host }}"
+      when:
+        - ee_base_registry_host | length > 0
+        - ee_base_registry_username | length > 0
+      changed_when: false
+      no_log: true
+
+    - name: Build the image with ansible-builder
+      when: _definition_parse is not failed
+      block:
+        - name: Run ansible-builder build
+          ansible.builtin.shell:
+            cmd: >-
+              set -o pipefail;
+              ansible-builder build
+              -f {{ _definition_file | quote }}
+              -c {{ (_context_dir ~ '/context') | quote }}
+              -t {{ ('localhost/' ~ _ee_name ~ ':' ~ _ee_tag) | quote }}
+              --container-runtime {{ ee_container_runtime }}
+              -v {{ ee_build_verbosity }}
+              2>&1 | tee {{ (_build_dir ~ '/build.log') | quote }}
+            chdir: "{{ _context_dir }}"
+            executable: /bin/bash
+          register: _build
+          changed_when: _build.rc == 0
+          failed_when: false
+
+        - name: Read the tail of the build log
+          ansible.builtin.command:
+            argv:
+              - tail
+              - "-n"
+              - "{{ ee_build_log_lines }}"
+              - "{{ _build_dir }}/build.log"
+          register: _build_log
+          changed_when: false
+          failed_when: false
+
+    - name: Record the outcome of a definition that would not parse
+      when: _definition_parse is failed
+      ansible.builtin.set_fact:
+        _build_rc: 1
+        _build_log_text: >-
+          The execution environment definition is not valid YAML and was never
+          passed to ansible-builder.
+          {{ _definition_parse.msg | default('YAML parse error') }}
+
+    - name: Record the outcome of the build
+      when: _definition_parse is not failed
+      ansible.builtin.set_fact:
+        _build_rc: "{{ _build.rc }}"
+        _build_log_text: "{{ _build_log.stdout | default(_build.stdout | default('')) }}"
+
+    - name: Publish the result for automation orchestrator
+      ansible.builtin.set_stats:
+        aggregate: false
+        per_host: false
+        data:
+          ee_build_result: "{{ 'success' if _build_rc | int == 0 else 'failed' }}"
+          ee_build_rc: "{{ _build_rc | int }}"
+          ee_name: "{{ _ee_name }}"
+          ee_tag: "{{ _ee_tag }}"
+          ee_local_image: "localhost/{{ _ee_name }}:{{ _ee_tag }}"
+          ee_definition: "{{ _definition_content }}"
+          ee_definition_path: "{{ ee_definition_path }}"
+          ee_definition_source: "{{ 'ai_override' if _use_override | bool else 'repository' }}"
+          ee_build_log_tail: "{{ _build_log_text }}"
+          ee_build_attempt: "{{ build_attempt | int }}"
+          ee_build_host: "{{ inventory_hostname }}"
+          ee_repo_url: "{{ ee_repo_url }}"
+          ee_git_ref: "{{ ee_git_ref }}"
+          ee_git_commit: "{{ _clone.after | default('') }}"
+
+    - name: Show the result
+      ansible.builtin.debug:
+        msg: >-
+          {{ _ee_name }} build {{ 'succeeded' if _build_rc | int == 0 else 'FAILED' }}
+          (attempt {{ build_attempt }}, definition from
+          {{ 'the AI repair step' if _use_override | bool else 'the repository' }}).
+          Image: localhost/{{ _ee_name }}:{{ _ee_tag }}
+
+    - name: Show the end of the build log when the build failed
+      when: _build_rc | int != 0
+      ansible.builtin.debug:
+        msg: "{{ _build_log_text.split('\n') }}"

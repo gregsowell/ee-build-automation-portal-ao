@@ -1,0 +1,63 @@
+---
+# Create a resource, or update it when one with the same name already exists.
+#
+# Input:
+#   upsert_api    Base API URL, for example "{{ _controller_api }}" or "{{ _eda_api }}"
+#   upsert_path   Collection path, for example "credentials" or "event-streams"
+#   upsert_body   The request body. Its "name" is the natural key.
+#   upsert_query  Optional extra query string for the lookup, without "?"
+#   upsert_patch  Optional body for the update. Defaults to upsert_body.
+# Output:
+#   upsert_id       ID of the resource
+#   upsert_created  true when it was created by this run
+- name: Look for an existing {{ upsert_body.name }}
+  ansible.builtin.uri:
+    url: >-
+      {{ upsert_api }}/{{ upsert_path }}/?name={{ upsert_body.name | urlencode }}{{
+         '&' ~ upsert_query if upsert_query | default('') | length > 0 else '' }}
+    headers: "{{ _api_headers }}"
+    validate_certs: "{{ aap_validate_certs }}"
+  register: _upsert_lookup
+
+- name: Note which {{ upsert_path }} entry matches exactly
+  ansible.builtin.set_fact:
+    _upsert_match: >-
+      {{ _upsert_lookup.json.results
+         | selectattr('name', 'equalto', upsert_body.name)
+         | list | first | default({}) }}
+
+- name: Create {{ upsert_body.name }}
+  ansible.builtin.uri:
+    url: "{{ upsert_api }}/{{ upsert_path }}/"
+    method: POST
+    headers: "{{ _api_headers }}"
+    body_format: json
+    body: "{{ upsert_body }}"
+    status_code: [200, 201]
+    validate_certs: "{{ aap_validate_certs }}"
+  register: _upsert_created
+  when: not _upsert_match
+
+- name: Update {{ upsert_body.name }}
+  ansible.builtin.uri:
+    url: "{{ upsert_api }}/{{ upsert_path }}/{{ _upsert_match.id }}/"
+    method: PATCH
+    headers: "{{ _api_headers }}"
+    body_format: json
+    body: "{{ upsert_patch | default(upsert_body) }}"
+    status_code: [200, 201, 202]
+    validate_certs: "{{ aap_validate_certs }}"
+  register: _upsert_updated
+  when: _upsert_match | length > 0
+
+- name: Remember the ID of {{ upsert_body.name }}
+  ansible.builtin.set_fact:
+    upsert_id: "{{ _upsert_match.id if _upsert_match else _upsert_created.json.id }}"
+    upsert_created: "{{ not _upsert_match }}"
+
+- name: Record what happened to {{ upsert_body.name }}
+  ansible.builtin.set_fact:
+    _setup_summary: >-
+      {{ (_setup_summary | default([])) + [
+           upsert_path ~ ': ' ~ upsert_body.name ~ ' (' ~ upsert_id ~ ') '
+           ~ ('created' if upsert_created | bool else 'updated') ] }}

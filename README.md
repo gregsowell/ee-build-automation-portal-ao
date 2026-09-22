@@ -1,2 +1,116 @@
-# ee-build-automation-portal-ao
-Use automation portal to build an execution environment requirements file, then use automation orchestrator to do the full build from there.
+# EE build automation: automation portal → EDA → automation orchestrator
+
+Build an execution environment automatically when someone saves a definition in
+the Ansible automation portal's execution environment builder. If the build
+fails, an AI agent reads the build log, rewrites the definition and the build
+runs again. When it works, the image is pushed to private automation hub and
+registered in Ansible Automation Platform.
+
+```mermaid
+flowchart TD
+    A[Automation portal<br/>EE builder] -->|pull request| B[(EE definitions<br/>GitHub repo)]
+    B -->|merge to main: push webhook| C[EDA event stream]
+    C --> D[Rulebook activation<br/>ee_definition_push.yml]
+    D -->|run_job_template| E[EE Build: Forward Event to AO]
+    E -->|POST /api/v1/webhooks/eda/...| F[Automation orchestrator<br/>Build-EE workflow]
+    F --> G[EE Build: Build Image<br/>ansible-builder on the build host]
+    G --> H{Build succeeded?}
+    H -->|no| I[AI repair agent<br/>rewrites the definition]
+    I -->|retry recommended| G
+    I -->|no| N[EE Build: Notify]
+    H -->|yes, AI was involved| J[Human approval]
+    H -->|yes, first try| K[EE Build: Register EE]
+    J -->|approved| K
+    J -->|rejected| N
+    K --> L[(Private automation hub<br/>container registry)]
+    K --> M[Execution environment<br/>in AAP]
+```
+
+The corrected definition lives in orchestrator workflow variables while the loop
+runs, so nothing is written back to Git during a build. What you merged stays
+what is in `main` until you choose to put the fix there.
+
+## What is in here
+
+| Path | What it is |
+|---|---|
+| `playbooks/ee_build.yml` | Builds the image with `ansible-builder`. Reports the outcome through `set_stats` instead of failing, so the orchestrator can read the log and retry. |
+| `playbooks/ee_register.yml` | Pushes the image to private automation hub and creates or updates the execution environment in AAP. |
+| `playbooks/ee_notify.yml` | Reports a build that failed, was rejected, or that the agent would not retry. |
+| `playbooks/ao_forward_event.yml` | Turns a GitHub push into one orchestrator trigger call per changed definition. |
+| `playbooks/ee_builder_prep.yml` | Installs podman and `ansible-builder` on the build host. Run once. |
+| `rulebooks/ee_definition_push.yml` | The rulebook behind the activation. |
+| `rulebooks/ee_definition_push_direct.yml` | An experiment: calling the orchestrator from the rulebook with no job template in between. See [below](#can-eda-call-the-orchestrator-directly). |
+| `workflows/build-ee.json` | The Build-EE workflow, with the loop, the AI repair step and the approval gate. |
+| `setup/configure_aap.yml` | Creates the credentials, project, job templates and EDA wiring in AAP. |
+| `setup/configure_ao.yml` | Creates the orchestrator service account and imports and publishes the workflow. |
+| `portal/README.md` | Configuring the portal to publish definitions to GitHub. |
+| `examples/` | One definition that builds and one that fails on purpose. |
+
+Nothing here holds a secret or a hostname. Every environment-specific value is a
+variable; the values live in `secrets.yml`, which is git-ignored. Start from
+[`setup/secrets.example.yml`](setup/secrets.example.yml).
+
+## Setup
+
+You need: AAP 2.5+ with Event-Driven Ansible and a private automation hub,
+automation orchestrator with an AAP integration already configured, a build host
+in an inventory, and an automation portal.
+
+```bash
+git clone https://github.com/<you>/ee-build-automation-portal-ao.git
+cd ee-build-automation-portal-ao
+cp setup/secrets.example.yml secrets.yml    # then fill it in
+
+# 1. Orchestrator: service account, workflow, EDA trigger.
+#    Prints a client ID and a client secret. Put them in secrets.yml.
+ansible-playbook setup/configure_ao.yml -e @secrets.yml
+
+# 2. AAP: credentials, project, job templates, event stream, activation.
+#    Prints the event stream URL for the GitHub webhook.
+ansible-playbook setup/configure_aap.yml -e @secrets.yml
+```
+
+Then:
+
+3. Run the **EE Build | Prep Builder Host** job template once.
+4. Add a webhook to the EE definitions repository: the event stream URL as the
+   payload URL, content type `application/json`, the `github_hmac_secret` value
+   as the secret, and the `push` event only.
+5. Send a test push and confirm the event arrives, then take the event stream
+   out of test mode so events reach the activation.
+6. Configure the portal, as described in [portal/README.md](portal/README.md).
+7. Give the workflow's AI step an LLM provider in the orchestrator.
+
+## How the loop decides what to do
+
+| Situation | What happens |
+|---|---|
+| The build succeeds on the first attempt | The image is registered. No approval needed. |
+| The build fails | The agent gets the definition that was built and the tail of the build log, and returns a corrected definition plus a structured diagnosis. |
+| The agent recommends a retry | The loop runs the build again with the corrected definition in `ee_definition_override`. |
+| The agent will not retry, or the fix touches credentials, a registry or the base image | The workflow stops and notifies instead of burning attempts. |
+| A build succeeds after the agent changed something | A human approves before the image is published. |
+| Four attempts pass with no working build | The workflow notifies. |
+
+## The AI never writes to Git
+
+The corrected definition only exists in the workflow run and in the build host's
+working directory. If you want to keep a fix, take the definition from the
+approval prompt or the build job's artifacts and open a pull request yourself.
+That keeps `main` reviewed and stops a repaired build from triggering itself
+again through the webhook.
+
+## Can EDA call the orchestrator directly?
+
+Partly. The orchestrator has a native Event-Driven Ansible trigger, and the
+workflow here uses it. What EDA cannot do on its own is make the HTTP call:
+rulebook actions launch job templates and workflow templates, and that is all.
+So a small job template makes the call, which is also what Red Hat's own
+documentation for the trigger does.
+
+`rulebooks/ee_definition_push_direct.yml` tries the shortcut with a `run_module`
+action. Red Hat documents `run_module` as unsupported in the Event-Driven
+Ansible controller, and the trigger endpoint wants a service account bearer
+token that a single module call cannot fetch first. Try it if you like; the
+job template route is the supported one.

@@ -1,0 +1,24 @@
+---
+# A definition that fails on purpose, to exercise the AI repair loop.
+#
+# Two planted faults:
+#   - "jmespathh" is not a package on PyPI, so pip fails.
+#   - "community.generall" is not a collection, so ansible-galaxy fails.
+#
+# The agent should identify the first real error, correct the name, and
+# recommend a retry.
+version: 3
+
+images:
+  base_image:
+    name: registry.redhat.io/ansible-automation-platform-25/ee-minimal-rhel9:latest
+
+dependencies:
+  galaxy:
+    collections:
+      - name: community.generall
+  python:
+    - jmespathh
+
+options:
+  package_manager_path: /usr/bin/microdnf

@@ -1,0 +1,557 @@
+---
+# Configure Ansible Automation Platform for the execution environment build
+# chain: credential types, credentials, a project, four job templates, and the
+# Event-Driven Ansible project, event stream and rulebook activation.
+#
+# Run it from anywhere with ansible-core and network access to AAP:
+#   ansible-playbook setup/configure_aap.yml -e @secrets.yml
+#
+# It only uses ansible.builtin, so no collections are needed. Everything is
+# created if missing and updated if present, so it is safe to rerun.
+- name: Configure AAP for execution environment builds
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    # --- connection ---------------------------------------------------------
+    aap_validate_certs: false
+    aap_organization: Default
+
+    # --- naming -------------------------------------------------------------
+    ee_project_name: EE Build Automation
+    ee_project_branch: main
+    ee_registry_credential_type: EE Build Registries
+    ee_registry_credential_name: EE Build Registries
+    ao_credential_type: Automation Orchestrator Service Account
+    ao_credential_name: Automation Orchestrator Service Account
+    ee_build_job_template: EE Build | Build Image
+    ee_register_job_template: EE Build | Register EE
+    ee_notify_job_template: EE Build | Notify
+    ee_forward_job_template: EE Build | Forward Event to AO
+    ee_prep_job_template: EE Build | Prep Builder Host
+    ee_localhost_inventory: Demo Inventory
+    ee_aap_credential_name: aap
+    # --- EDA ----------------------------------------------------------------
+    eda_project_name: EE Build Automation
+    eda_event_stream_name: EE Definitions GitHub
+    eda_activation_name: EE Definition Push
+    eda_rulebook_name: ee_definition_push.yml
+    eda_decision_environment: Hub Default Decision Environment
+    eda_github_credential_name: EE Definitions GitHub HMAC
+    eda_controller_credential_name: EE Build Controller
+    eda_hmac_header: X-Hub-Signature-256
+    eda_hmac_format: hex
+    eda_hmac_prefix: "sha256="
+
+  tasks:
+    - name: Check the required variables
+      ansible.builtin.assert:
+        that:
+          - aap_url is defined and aap_url | length > 0
+          - aap_token is defined and aap_token | length > 0
+          - ee_repo_scm_url is defined and ee_repo_scm_url | length > 0
+          - ee_hub_host is defined and ee_hub_host | length > 0
+          - ao_url is defined and ao_url | length > 0
+        fail_msg: >-
+          Copy setup/secrets.example.yml to secrets.yml, fill it in and pass it
+          with -e @secrets.yml.
+
+    - name: Set the API roots
+      ansible.builtin.set_fact:
+        _controller_api: "{{ aap_url | regex_replace('/$', '') }}/api/controller/v2"
+        _eda_api: "{{ aap_url | regex_replace('/$', '') }}/api/eda/v1"
+        _api_headers:
+          Authorization: "Bearer {{ aap_token }}"
+      no_log: true
+
+    - name: Find the organization
+      ansible.builtin.uri:
+        url: "{{ _controller_api }}/organizations/?name={{ aap_organization | urlencode }}"
+        headers: "{{ _api_headers }}"
+        validate_certs: "{{ aap_validate_certs }}"
+      register: _org
+
+    - name: Keep the organization ID
+      ansible.builtin.set_fact:
+        _org_id: "{{ (_org.json.results | first).id }}"
+
+    # ------------------------------------------------------------------ types
+    - name: Create the registry credential type
+      vars:
+        upsert_api: "{{ _controller_api }}"
+        upsert_path: credential_types
+        upsert_body:
+          name: "{{ ee_registry_credential_type }}"
+          description: Registry logins used when building and publishing execution environments.
+          kind: cloud
+          inputs:
+            fields:
+              - id: ee_hub_host
+                type: string
+                label: Private automation hub registry host
+              - id: ee_hub_username
+                type: string
+                label: Hub username
+              - id: ee_hub_password
+                type: string
+                label: Hub password
+                secret: true
+              - id: ee_base_registry_host
+                type: string
+                label: Base image registry host
+              - id: ee_base_registry_username
+                type: string
+                label: Base image registry username
+              - id: ee_base_registry_password
+                type: string
+                label: Base image registry password or token
+                secret: true
+            required:
+              - ee_hub_host
+              - ee_hub_username
+              - ee_hub_password
+          injectors:
+            extra_vars:
+              ee_hub_host: "{% raw %}{{ ee_hub_host }}{% endraw %}"
+              ee_hub_username: "{% raw %}{{ ee_hub_username }}{% endraw %}"
+              ee_hub_password: "{% raw %}{{ ee_hub_password }}{% endraw %}"
+              ee_base_registry_host: "{% raw %}{{ ee_base_registry_host }}{% endraw %}"
+              ee_base_registry_username: "{% raw %}{{ ee_base_registry_username }}{% endraw %}"
+              ee_base_registry_password: "{% raw %}{{ ee_base_registry_password }}{% endraw %}"
+      ansible.builtin.include_tasks: tasks/upsert.yml
+
+    - name: Keep the registry credential type ID
+      ansible.builtin.set_fact:
+        _registry_type_id: "{{ upsert_id }}"
+
+    - name: Create the orchestrator credential type
+      vars:
+        upsert_api: "{{ _controller_api }}"
+        upsert_path: credential_types
+        upsert_body:
+          name: "{{ ao_credential_type }}"
+          description: Service account used to start workflows in automation orchestrator.
+          kind: cloud
+          inputs:
+            fields:
+              - id: ao_url
+                type: string
+                label: Automation orchestrator URL
+              - id: ao_client_id
+                type: string
+                label: Service account client ID
+              - id: ao_client_secret
+                type: string
+                label: Service account client secret
+                secret: true
+            required:
+              - ao_url
+              - ao_client_id
+              - ao_client_secret
+          injectors:
+            env:
+              AO_URL: "{% raw %}{{ ao_url }}{% endraw %}"
+              AO_CLIENT_ID: "{% raw %}{{ ao_client_id }}{% endraw %}"
+              AO_CLIENT_SECRET: "{% raw %}{{ ao_client_secret }}{% endraw %}"
+      ansible.builtin.include_tasks: tasks/upsert.yml
+
+    - name: Keep the orchestrator credential type ID
+      ansible.builtin.set_fact:
+        _ao_type_id: "{{ upsert_id }}"
+
+    # ------------------------------------------------------------ credentials
+    - name: Create the registry credential
+      vars:
+        upsert_api: "{{ _controller_api }}"
+        upsert_path: credentials
+        upsert_body:
+          name: "{{ ee_registry_credential_name }}"
+          organization: "{{ _org_id | int }}"
+          credential_type: "{{ _registry_type_id | int }}"
+          inputs:
+            ee_hub_host: "{{ ee_hub_host }}"
+            ee_hub_username: "{{ ee_hub_username }}"
+            ee_hub_password: "{{ ee_hub_password }}"
+            ee_base_registry_host: "{{ ee_base_registry_host | default('registry.redhat.io') }}"
+            ee_base_registry_username: "{{ ee_base_registry_username | default('') }}"
+            ee_base_registry_password: "{{ ee_base_registry_password | default('') }}"
+      ansible.builtin.include_tasks: tasks/upsert.yml
+      no_log: true
+
+    - name: Keep the registry credential ID
+      ansible.builtin.set_fact:
+        _registry_credential_id: "{{ upsert_id }}"
+
+    - name: Create the orchestrator credential
+      vars:
+        upsert_api: "{{ _controller_api }}"
+        upsert_path: credentials
+        upsert_body:
+          name: "{{ ao_credential_name }}"
+          organization: "{{ _org_id | int }}"
+          credential_type: "{{ _ao_type_id | int }}"
+          inputs:
+            ao_url: "{{ ao_url }}"
+            ao_client_id: "{{ ao_client_id | default('') }}"
+            ao_client_secret: "{{ ao_client_secret | default('') }}"
+      ansible.builtin.include_tasks: tasks/upsert.yml
+      no_log: true
+
+    - name: Keep the orchestrator credential ID
+      ansible.builtin.set_fact:
+        _ao_credential_id: "{{ upsert_id }}"
+
+    - name: Find the machine credential for the build host
+      ansible.builtin.uri:
+        url: "{{ _controller_api }}/credentials/?name={{ ee_machine_credential | urlencode }}"
+        headers: "{{ _api_headers }}"
+        validate_certs: "{{ aap_validate_certs }}"
+      register: _machine_cred
+
+    - name: Find the controller credential used to register the EE
+      ansible.builtin.uri:
+        url: "{{ _controller_api }}/credentials/?name={{ ee_aap_credential_name | urlencode }}"
+        headers: "{{ _api_headers }}"
+        validate_certs: "{{ aap_validate_certs }}"
+      register: _aap_cred
+
+    - name: Find the inventories
+      ansible.builtin.uri:
+        url: "{{ _controller_api }}/inventories/?name={{ item | urlencode }}"
+        headers: "{{ _api_headers }}"
+        validate_certs: "{{ aap_validate_certs }}"
+      loop:
+        - "{{ ee_build_inventory }}"
+        - "{{ ee_localhost_inventory }}"
+      register: _inventories
+
+    - name: Keep the IDs that the job templates need
+      ansible.builtin.set_fact:
+        _machine_credential_id: "{{ (_machine_cred.json.results | first).id }}"
+        _aap_credential_id: >-
+          {{ (_aap_cred.json.results | first).id if _aap_cred.json.count | int > 0 else '' }}
+        _build_inventory_id: "{{ (_inventories.results[0].json.results | first).id }}"
+        _localhost_inventory_id: "{{ (_inventories.results[1].json.results | first).id }}"
+
+    # --------------------------------------------------------------- project
+    - name: Create the project
+      vars:
+        upsert_api: "{{ _controller_api }}"
+        upsert_path: projects
+        upsert_body:
+          name: "{{ ee_project_name }}"
+          description: Playbooks that build, register and report on execution environments.
+          organization: "{{ _org_id | int }}"
+          scm_type: git
+          scm_url: "{{ ee_repo_scm_url }}"
+          scm_branch: "{{ ee_project_branch }}"
+          scm_update_on_launch: true
+          scm_clean: true
+      ansible.builtin.include_tasks: tasks/upsert.yml
+
+    - name: Keep the project ID
+      ansible.builtin.set_fact:
+        _project_id: "{{ upsert_id }}"
+
+    - name: Sync the project
+      ansible.builtin.uri:
+        url: "{{ _controller_api }}/projects/{{ _project_id }}/update/"
+        method: POST
+        headers: "{{ _api_headers }}"
+        status_code: [200, 201, 202]
+        validate_certs: "{{ aap_validate_certs }}"
+      register: _project_sync
+
+    - name: Wait for the project sync to finish
+      ansible.builtin.uri:
+        url: "{{ _controller_api }}/project_updates/{{ _project_sync.json.id }}/"
+        headers: "{{ _api_headers }}"
+        validate_certs: "{{ aap_validate_certs }}"
+      register: _sync_status
+      until: _sync_status.json.status in ['successful', 'failed', 'error', 'canceled']
+      retries: 30
+      delay: 5
+
+    - name: Stop when the project did not sync
+      ansible.builtin.fail:
+        msg: "The {{ ee_project_name }} project sync ended as {{ _sync_status.json.status }}."
+      when: _sync_status.json.status != 'successful'
+
+    # -------------------------------------------------------- job templates
+    - name: Create the job templates
+      vars:
+        upsert_api: "{{ _controller_api }}"
+        upsert_path: job_templates
+        upsert_body: "{{ item }}"
+      ansible.builtin.include_tasks: tasks/upsert.yml
+      loop:
+        - name: "{{ ee_build_job_template }}"
+          description: Builds an execution environment image with ansible-builder on the build host.
+          job_type: run
+          organization: "{{ _org_id | int }}"
+          inventory: "{{ _build_inventory_id | int }}"
+          project: "{{ _project_id | int }}"
+          playbook: playbooks/ee_build.yml
+          limit: "{{ ee_build_host_limit }}"
+          ask_variables_on_launch: true
+          ask_limit_on_launch: true
+          timeout: 7200
+          verbosity: 0
+        - name: "{{ ee_register_job_template }}"
+          description: Pushes a built image to private automation hub and registers it in AAP.
+          job_type: run
+          organization: "{{ _org_id | int }}"
+          inventory: "{{ _build_inventory_id | int }}"
+          project: "{{ _project_id | int }}"
+          playbook: playbooks/ee_register.yml
+          limit: "{{ ee_build_host_limit }}"
+          ask_variables_on_launch: true
+          timeout: 3600
+        - name: "{{ ee_notify_job_template }}"
+          description: Reports the outcome of an execution environment build.
+          job_type: run
+          organization: "{{ _org_id | int }}"
+          inventory: "{{ _localhost_inventory_id | int }}"
+          project: "{{ _project_id | int }}"
+          playbook: playbooks/ee_notify.yml
+          ask_variables_on_launch: true
+        - name: "{{ ee_forward_job_template }}"
+          description: Forwards a GitHub push event to the orchestrator EDA trigger.
+          job_type: run
+          organization: "{{ _org_id | int }}"
+          inventory: "{{ _localhost_inventory_id | int }}"
+          project: "{{ _project_id | int }}"
+          playbook: playbooks/ao_forward_event.yml
+          ask_variables_on_launch: true
+          extra_vars:
+            ao_webhook_path: "{{ ao_webhook_path | default('ee-definition-pushed') }}"
+        - name: "{{ ee_prep_job_template }}"
+          description: Installs podman and ansible-builder on the execution environment build host.
+          job_type: run
+          organization: "{{ _org_id | int }}"
+          inventory: "{{ _build_inventory_id | int }}"
+          project: "{{ _project_id | int }}"
+          playbook: playbooks/ee_builder_prep.yml
+          limit: "{{ ee_build_host_limit }}"
+          ask_variables_on_launch: true
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Look up the job templates again to attach credentials
+      ansible.builtin.uri:
+        url: "{{ _controller_api }}/job_templates/?name={{ item.name | urlencode }}"
+        headers: "{{ _api_headers }}"
+        validate_certs: "{{ aap_validate_certs }}"
+      loop:
+        - name: "{{ ee_build_job_template }}"
+          credentials: "{{ [_machine_credential_id, _registry_credential_id] }}"
+        - name: "{{ ee_register_job_template }}"
+          credentials: >-
+            {{ [_machine_credential_id, _registry_credential_id]
+               + ([_aap_credential_id] if _aap_credential_id | length > 0 else []) }}
+        - name: "{{ ee_notify_job_template }}"
+          credentials: []
+        - name: "{{ ee_forward_job_template }}"
+          credentials: "{{ [_ao_credential_id] }}"
+        - name: "{{ ee_prep_job_template }}"
+          credentials: "{{ [_machine_credential_id] }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: _jt_lookup
+
+    - name: Attach the credentials to each job template
+      ansible.builtin.uri:
+        url: "{{ _controller_api }}/job_templates/{{ item.0.json.results[0].id }}/credentials/"
+        method: POST
+        headers: "{{ _api_headers }}"
+        body_format: json
+        body:
+          id: "{{ item.1 | int }}"
+        status_code: [200, 201, 204, 400]
+        validate_certs: "{{ aap_validate_certs }}"
+      loop: "{{ _jt_lookup.results | subelements('item.credentials') }}"
+      loop_control:
+        label: "{{ item.0.item.name }} <- credential {{ item.1 }}"
+
+    # ------------------------------------------------------------------- EDA
+    - name: Create the EDA project
+      vars:
+        upsert_api: "{{ _eda_api }}"
+        upsert_path: projects
+        upsert_body:
+          name: "{{ eda_project_name }}"
+          description: Rulebooks for the execution environment build chain.
+          url: "{{ ee_repo_scm_url }}"
+          scm_branch: "{{ ee_project_branch }}"
+          organization_id: "{{ _org_id | int }}"
+      ansible.builtin.include_tasks: tasks/upsert.yml
+
+    - name: Keep the EDA project ID
+      ansible.builtin.set_fact:
+        _eda_project_id: "{{ upsert_id }}"
+
+    - name: Sync the EDA project
+      ansible.builtin.uri:
+        url: "{{ _eda_api }}/projects/{{ _eda_project_id }}/sync/"
+        method: POST
+        headers: "{{ _api_headers }}"
+        status_code: [200, 201, 202, 204, 409]
+        validate_certs: "{{ aap_validate_certs }}"
+
+    - name: Wait for the rulebook to appear
+      ansible.builtin.uri:
+        url: "{{ _eda_api }}/rulebooks/?name={{ eda_rulebook_name | urlencode }}"
+        headers: "{{ _api_headers }}"
+        validate_certs: "{{ aap_validate_certs }}"
+      register: _eda_rulebook
+      until: _eda_rulebook.json.count | int > 0
+      retries: 30
+      delay: 5
+
+    - name: Find the EDA credential types
+      ansible.builtin.uri:
+        url: "{{ _eda_api }}/credential-types/?name={{ item | urlencode }}"
+        headers: "{{ _api_headers }}"
+        validate_certs: "{{ aap_validate_certs }}"
+      loop:
+        - GitHub Event Stream
+        - Red Hat Ansible Automation Platform
+      register: _eda_types
+
+    - name: Create the GitHub HMAC credential
+      vars:
+        upsert_api: "{{ _eda_api }}"
+        upsert_path: eda-credentials
+        upsert_body:
+          name: "{{ eda_github_credential_name }}"
+          description: Validates the GitHub webhook signature on the EE definitions event stream.
+          credential_type_id: "{{ (_eda_types.results[0].json.results | first).id | int }}"
+          organization_id: "{{ _org_id | int }}"
+          inputs:
+            auth_type: hmac
+            secret: "{{ github_hmac_secret }}"
+            hash_algorithm: sha256
+            header_key: "{{ eda_hmac_header }}"
+            signature_encoding: "{{ eda_hmac_format }}"
+            signature_prefix: "{{ eda_hmac_prefix }}"
+      ansible.builtin.include_tasks: tasks/upsert.yml
+      no_log: true
+
+    - name: Keep the HMAC credential ID
+      ansible.builtin.set_fact:
+        _eda_github_credential_id: "{{ upsert_id }}"
+
+    - name: Create the controller credential for EDA
+      vars:
+        upsert_api: "{{ _eda_api }}"
+        upsert_path: eda-credentials
+        upsert_body:
+          name: "{{ eda_controller_credential_name }}"
+          description: Lets the rulebook activation launch job templates.
+          credential_type_id: "{{ (_eda_types.results[1].json.results | first).id | int }}"
+          organization_id: "{{ _org_id | int }}"
+          inputs:
+            host: "{{ aap_url | regex_replace('/$', '') }}/api/controller/"
+            oauth_token: "{{ aap_token }}"
+            verify_ssl: "{{ aap_validate_certs }}"
+      ansible.builtin.include_tasks: tasks/upsert.yml
+      no_log: true
+
+    - name: Keep the EDA controller credential ID
+      ansible.builtin.set_fact:
+        _eda_controller_credential_id: "{{ upsert_id }}"
+
+    - name: Create the event stream
+      vars:
+        upsert_api: "{{ _eda_api }}"
+        upsert_path: event-streams
+        upsert_body:
+          name: "{{ eda_event_stream_name }}"
+          event_stream_type: hmac
+          eda_credential_id: "{{ _eda_github_credential_id | int }}"
+          organization_id: "{{ _org_id | int }}"
+          # Events only reach the activation once this is true. Leave it off
+          # until the event stream's test mode shows a GitHub push arriving.
+          test_mode: "{{ eda_event_stream_test_mode | default(true) }}"
+      ansible.builtin.include_tasks: tasks/upsert.yml
+
+    - name: Keep the event stream ID
+      ansible.builtin.set_fact:
+        _event_stream_id: "{{ upsert_id }}"
+
+    - name: Read the event stream back for its URL
+      ansible.builtin.uri:
+        url: "{{ _eda_api }}/event-streams/{{ _event_stream_id }}/"
+        headers: "{{ _api_headers }}"
+        validate_certs: "{{ aap_validate_certs }}"
+      register: _event_stream
+
+    - name: Find the decision environment
+      ansible.builtin.uri:
+        url: "{{ _eda_api }}/decision-environments/?name={{ eda_decision_environment | urlencode }}"
+        headers: "{{ _api_headers }}"
+        validate_certs: "{{ aap_validate_certs }}"
+      register: _eda_de
+
+    - name: Create the rulebook activation
+      block:
+        - name: Create the activation with the event stream attached
+          vars:
+            upsert_api: "{{ _eda_api }}"
+            upsert_path: activations
+            upsert_body:
+              name: "{{ eda_activation_name }}"
+              description: Starts a Build-EE run when an EE definition lands on main.
+              project_id: "{{ _eda_project_id | int }}"
+              rulebook_id: "{{ (_eda_rulebook.json.results | first).id | int }}"
+              decision_environment_id: "{{ (_eda_de.json.results | first).id | int }}"
+              organization_id: "{{ _org_id | int }}"
+              eda_credentials: "{{ [_eda_controller_credential_id | int] }}"
+              restart_policy: on-failure
+              log_level: info
+              is_enabled: true
+              source_mappings: |
+                - event_stream_id: {{ _event_stream_id | int }}
+                  event_stream_name: {{ eda_event_stream_name }}
+                  rulebook_hash: {{ (_eda_rulebook.json.results | first).rulesets | hash('sha256') }}
+                  source_name: __SOURCE_1
+          ansible.builtin.include_tasks: tasks/upsert.yml
+      rescue:
+        - name: Create the activation without the event stream
+          vars:
+            upsert_api: "{{ _eda_api }}"
+            upsert_path: activations
+            upsert_body:
+              name: "{{ eda_activation_name }}"
+              description: Starts a Build-EE run when an EE definition lands on main.
+              project_id: "{{ _eda_project_id | int }}"
+              rulebook_id: "{{ (_eda_rulebook.json.results | first).id | int }}"
+              decision_environment_id: "{{ (_eda_de.json.results | first).id | int }}"
+              organization_id: "{{ _org_id | int }}"
+              eda_credentials: "{{ [_eda_controller_credential_id | int] }}"
+              restart_policy: on-failure
+              log_level: info
+              is_enabled: true
+          ansible.builtin.include_tasks: tasks/upsert.yml
+
+        - name: Say that the event stream must be attached by hand
+          ansible.builtin.set_fact:
+            _setup_summary: >-
+              {{ (_setup_summary | default([])) + [
+                   'ATTACH BY HAND: open the ' ~ eda_activation_name ~ ' activation and set its'
+                   ~ ' source to the ' ~ eda_event_stream_name ~ ' event stream. The API refused'
+                   ~ ' the source mapping, which usually means the rulebook hash did not match.' ] }}
+
+    # --------------------------------------------------------------- summary
+    - name: Show what was configured
+      ansible.builtin.debug:
+        msg: "{{ _setup_summary }}"
+
+    - name: Show the webhook URL for GitHub
+      ansible.builtin.debug:
+        msg:
+          - "Event stream URL (GitHub webhook payload URL):"
+          - "{{ _event_stream.json.url | default('read it from the event stream in the UI') }}"
+          - "Content type: application/json, secret: the value of github_hmac_secret, events: push"
+          - "While the event stream is in test mode, events are recorded but not forwarded."

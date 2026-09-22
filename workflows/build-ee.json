@@ -1,0 +1,391 @@
+{
+  "schema_version": "2.0.0",
+  "name": "Build-EE",
+  "description": "Builds an execution environment when a definition is pushed to the EE definitions repository. A failed build is analyzed by an AI agent, which rewrites the definition for the next attempt. The corrected definition is carried in workflow variables, so nothing is written back to Git during the loop.",
+  "triggers": [
+    {
+      "id": "trigger_eda_definition_pushed",
+      "type": "eda_trigger",
+      "name": "EDA: EE definition pushed",
+      "parameters": {
+        "webhook_path": "ee-definition-pushed",
+        "input_schema": {
+          "type": "object",
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "properties": {
+            "ee_name": {
+              "type": "string",
+              "description": "Name of the execution environment to build."
+            },
+            "repo_url": {
+              "type": "string",
+              "description": "HTTPS URL of the repository holding the definition."
+            },
+            "git_ref": {
+              "type": "string",
+              "description": "Commit SHA or branch to build."
+            },
+            "definition_path": {
+              "type": "string",
+              "description": "Path to the definition file inside the repository."
+            },
+            "pushed_by": {
+              "type": "string",
+              "description": "Who pushed the definition."
+            },
+            "commit_message": {
+              "type": "string",
+              "description": "Message of the commit that triggered the build."
+            }
+          },
+          "required": [
+            "repo_url",
+            "definition_path"
+          ],
+          "additionalProperties": true
+        }
+      },
+      "position": {
+        "x": 0,
+        "y": 194.75
+      }
+    }
+  ],
+  "nodes": [
+    {
+      "id": "loop_until_built",
+      "type": "loop",
+      "name": "Loop Until Working",
+      "parameters": {
+        "type": "do_while",
+        "condition": "(${check_build_succeeded.evaluated_result} == false or ${loop_until_built.iteration_count} == 0)",
+        "max_iterations": 4
+      },
+      "settings": {},
+      "position": {
+        "x": 360,
+        "y": 145.75
+      }
+    },
+    {
+      "id": "build_ee",
+      "type": "aap_job_template",
+      "name": "Build-EE-JobTemplate",
+      "parameters": {
+        "diff_mode": false,
+        "credential_id": "CREDENTIAL_ID_PLACEHOLDER",
+        "integration_id": "INTEGRATION_ID_PLACEHOLDER",
+        "job_template_name": "EE Build | Build Image",
+        "organization_name": "Default",
+        "extra_vars": {
+          "ee_name": "${trigger.ee_name}",
+          "ee_repo_url": "${trigger.repo_url}",
+          "ee_git_ref": "${trigger.git_ref}",
+          "ee_definition_path": "${trigger.definition_path}",
+          "build_attempt": "${loop_until_built.iteration_count}",
+          "ee_definition_override": "${ai_repair.updated_execution_environment_yml}"
+        }
+      },
+      "position": {
+        "x": 680,
+        "y": 245.75
+      }
+    },
+    {
+      "id": "check_build_succeeded",
+      "type": "condition",
+      "name": "Previous Completed Succesfully",
+      "parameters": {
+        "condition": "${build_ee.artifacts.ee_build_result} == 'success'"
+      },
+      "position": {
+        "x": 960,
+        "y": 245.75
+      }
+    },
+    {
+      "id": "ai_repair",
+      "type": "agentic",
+      "name": "AI Repair EE Build Failure",
+      "parameters": {
+        "prompt": "You are an Ansible execution environment (EE) build engineer. An ansible-builder build of an execution environment failed. Diagnose the failure and propose the smallest change to the EE definition that will make the next build succeed.\n\nBuild job:\n- Job ID: ${build_ee.job_id}\n- Status: ${build_ee.job_status}\n- Job URL: ${build_ee.job_url}\n- Build attempt: ${loop_until_built.iteration_count}\n\nExecution environment:\n- Name: ${build_ee.artifacts.ee_name}\n- Definition file: ${build_ee.artifacts.ee_definition_path}\n- Repository: ${build_ee.artifacts.ee_repo_url} at ${build_ee.artifacts.ee_git_ref}\n- This definition came from: ${build_ee.artifacts.ee_definition_source} (repository means it is the file as pushed; ai_override means it is your own previous correction)\n\nThe exact definition content that was built (ansible-builder version 3 format):\n${build_ee.artifacts.ee_definition}\n\nThe end of the ansible-builder and podman build log:\n${build_ee.artifacts.ee_build_log_tail}\n\nInstructions:\n1. Base your analysis only on the job data above. Do not invent errors that are not in the log. If the log does not contain enough detail to identify the cause, set failure_category to \"insufficient_data\", describe what is missing in root_cause, and set retry_recommended to false.\n2. Find the first real error in the build log. Ignore later errors that cascade from it.\n3. Classify the failure using the failure_category values.\n4. Propose the smallest set of changes that fixes it. Typical fixes: pin or relax a Python package version, add a missing system package to the system dependencies, correct a Galaxy collection name or version, change the base image, or add a build step. Only remove a dependency if it is the cause.\n5. If this definition is already one of your corrections and the same error is back, try a different approach rather than repeating the previous change.\n6. Quote the log lines that show the root cause verbatim in error_excerpt.\n7. Return the complete corrected definition in updated_execution_environment_yml, as valid YAML with no markdown fences, so the next build can write it straight over the definition file.\n8. Set retry_recommended to true only if you are confident the change addresses the root cause. Set requires_human_review to true if the fix involves credentials, registry authentication, network access, or a base image change.",
+        "response_schema": {
+          "type": "object",
+          "required": [
+            "summary",
+            "failure_category",
+            "root_cause",
+            "changes",
+            "retry_recommended"
+          ],
+          "properties": {
+            "changes": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "section",
+                  "action",
+                  "item",
+                  "reason"
+                ],
+                "properties": {
+                  "item": {
+                    "type": "string",
+                    "description": "Package, collection, image, or setting being changed, for example jmespath or community.general."
+                  },
+                  "action": {
+                    "enum": [
+                      "add",
+                      "update",
+                      "remove"
+                    ],
+                    "type": "string",
+                    "description": "What to do to the item."
+                  },
+                  "reason": {
+                    "type": "string",
+                    "description": "Why this change fixes the failure."
+                  },
+                  "section": {
+                    "enum": [
+                      "images",
+                      "dependencies.python",
+                      "dependencies.system",
+                      "dependencies.galaxy",
+                      "dependencies.ansible_core",
+                      "dependencies.ansible_runner",
+                      "additional_build_steps",
+                      "build_arg_defaults",
+                      "options"
+                    ],
+                    "type": "string",
+                    "description": "Section of the execution environment definition to change."
+                  },
+                  "to_value": {
+                    "type": "string",
+                    "description": "New value or version constraint. Empty when removing."
+                  },
+                  "from_value": {
+                    "type": "string",
+                    "description": "Current value or version constraint. Empty when adding."
+                  }
+                }
+              },
+              "description": "Minimal changes to the definition, in the order to apply them."
+            },
+            "summary": {
+              "type": "string",
+              "description": "One or two sentences on why the build failed and what the fix does."
+            },
+            "confidence": {
+              "type": "number",
+              "maximum": 1,
+              "minimum": 0,
+              "description": "Confidence from 0 to 1 that the proposed changes fix the build."
+            },
+            "root_cause": {
+              "type": "string",
+              "description": "The first real error from the build log and why it happened."
+            },
+            "error_excerpt": {
+              "type": "string",
+              "description": "The log lines that show the root cause, copied verbatim."
+            },
+            "failure_category": {
+              "enum": [
+                "python_dependency",
+                "system_package",
+                "galaxy_collection",
+                "base_image",
+                "registry_auth",
+                "build_step",
+                "ee_definition_syntax",
+                "network",
+                "insufficient_data",
+                "other"
+              ],
+              "type": "string",
+              "description": "Primary cause of the build failure."
+            },
+            "retry_recommended": {
+              "type": "boolean",
+              "description": "True when the build should be retried with the updated definition."
+            },
+            "requires_human_review": {
+              "type": "boolean",
+              "description": "True when the fix touches credentials, registry authentication, network access, or the base image."
+            },
+            "updated_execution_environment_yml": {
+              "type": "string",
+              "description": "The complete corrected execution environment definition."
+            }
+          }
+        },
+        "tool_selection_strategy": "NONE"
+      },
+      "settings": {},
+      "position": {
+        "x": 1443.923100701157,
+        "y": 478.48208891421325
+      }
+    },
+    {
+      "id": "check_ai_recommends_retry",
+      "type": "condition",
+      "name": "AI Recommends Retry",
+      "parameters": {
+        "condition": "${ai_repair.retry_recommended} == true and ${ai_repair.requires_human_review} != true"
+      },
+      "position": {
+        "x": 1800,
+        "y": 660
+      }
+    },
+    {
+      "id": "check_ai_modified_definition",
+      "type": "condition",
+      "name": "Did AI Modify EE Files",
+      "parameters": {
+        "condition": "${loop_until_built.iteration_count} > 1"
+      },
+      "position": {
+        "x": 1245.8393300743553,
+        "y": 28.817592462522896
+      }
+    },
+    {
+      "id": "human_approval",
+      "type": "approval",
+      "name": "Human Approval",
+      "parameters": {
+        "prompt": "An AI agent modified the execution environment definition for ${build_ee.artifacts.ee_name} and the build then succeeded.\n\nWhat it changed: ${ai_repair.summary}\nRoot cause: ${ai_repair.root_cause}\n\nThe definition that was built:\n${build_ee.artifacts.ee_definition}\n\nApprove to push this image to private automation hub and register it in Ansible Automation Platform.",
+        "fallback_decision": "reject",
+        "decision_window": 14400,
+        "approver_users": [
+          "admin"
+        ]
+      },
+      "settings": {},
+      "position": {
+        "x": 1535.7338393425082,
+        "y": -123.90731973728454
+      }
+    },
+    {
+      "id": "register_new_ee",
+      "type": "aap_job_template",
+      "name": "Register New EE",
+      "parameters": {
+        "diff_mode": false,
+        "credential_id": "CREDENTIAL_ID_PLACEHOLDER",
+        "integration_id": "INTEGRATION_ID_PLACEHOLDER",
+        "job_template_name": "EE Build | Register EE",
+        "organization_name": "Default",
+        "extra_vars": {
+          "ee_name": "${build_ee.artifacts.ee_name}",
+          "ee_tag": "${build_ee.artifacts.ee_tag}",
+          "ee_local_image": "${build_ee.artifacts.ee_local_image}",
+          "ee_repo_url": "${build_ee.artifacts.ee_repo_url}"
+        }
+      },
+      "position": {
+        "x": 1932.6755019413933,
+        "y": 248.3169610043306
+      }
+    },
+    {
+      "id": "notify_failure",
+      "type": "aap_job_template",
+      "name": "EE Build Failed - Send Notification",
+      "parameters": {
+        "diff_mode": false,
+        "credential_id": "CREDENTIAL_ID_PLACEHOLDER",
+        "integration_id": "INTEGRATION_ID_PLACEHOLDER",
+        "job_template_name": "EE Build | Notify",
+        "organization_name": "Default",
+        "extra_vars": {
+          "ee_name": "${build_ee.artifacts.ee_name}",
+          "ee_notify_reason": "build_failed",
+          "ee_definition_path": "${build_ee.artifacts.ee_definition_path}",
+          "ee_repo_url": "${build_ee.artifacts.ee_repo_url}",
+          "ee_git_ref": "${build_ee.artifacts.ee_git_ref}",
+          "ee_build_attempt": "${loop_until_built.iteration_count}",
+          "ee_build_log_tail": "${build_ee.artifacts.ee_build_log_tail}",
+          "ee_ai_summary": "${ai_repair.summary}",
+          "ee_ai_root_cause": "${ai_repair.root_cause}",
+          "ee_job_url": "${build_ee.job_url}"
+        }
+      },
+      "position": {
+        "x": 685.0264776325732,
+        "y": -83.56839356278786
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "trigger_eda_definition_pushed",
+      "to": "loop_until_built"
+    },
+    {
+      "from": "loop_until_built",
+      "to": "build_ee",
+      "from_port": "iterate"
+    },
+    {
+      "from": "build_ee",
+      "to": "check_build_succeeded"
+    },
+    {
+      "from": "check_build_succeeded",
+      "to": "ai_repair",
+      "from_port": "false"
+    },
+    {
+      "from": "ai_repair",
+      "to": "check_ai_recommends_retry"
+    },
+    {
+      "from": "check_ai_recommends_retry",
+      "to": "loop_until_built",
+      "from_port": "true",
+      "to_port": "iterate"
+    },
+    {
+      "from": "check_ai_recommends_retry",
+      "to": "notify_failure",
+      "from_port": "false"
+    },
+    {
+      "from": "loop_until_built",
+      "to": "notify_failure",
+      "from_port": "complete"
+    },
+    {
+      "from": "check_build_succeeded",
+      "to": "check_ai_modified_definition",
+      "from_port": "true"
+    },
+    {
+      "from": "check_ai_modified_definition",
+      "to": "register_new_ee",
+      "from_port": "false"
+    },
+    {
+      "from": "check_ai_modified_definition",
+      "to": "human_approval",
+      "from_port": "true"
+    },
+    {
+      "from": "human_approval",
+      "to": "register_new_ee",
+      "from_port": "approved"
+    },
+    {
+      "from": "human_approval",
+      "to": "notify_failure",
+      "from_port": "rejected"
+    }
+  ]
+}

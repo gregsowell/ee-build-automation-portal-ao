@@ -1,0 +1,46 @@
+---
+# Experiment: call the automation orchestrator trigger straight from the
+# rulebook, with no job template in between.
+#
+# Red Hat documents run_module and run_playbook as unsupported in the
+# Event-Driven Ansible controller, and the orchestrator documentation routes
+# events through a job template instead. Try this activation first: if the
+# orchestrator starts a run, this rulebook replaces ee_definition_push.yml and
+# the "EE Build | Forward Event to AO" job template is not needed.
+#
+# Limits of this route, even when it works:
+#   - One HTTP call per rule, so there is no place to fetch a service account
+#     token first. The trigger must either allow unauthenticated requests or
+#     accept a long-lived token passed in as ao_token.
+#   - No filtering of which changed files are definitions, so the orchestrator
+#     receives every push to main and the build step works out the rest.
+#
+# Activation variables: ao_url, ao_webhook_path, ao_token (optional)
+- name: Execution environment definition pushed (direct to orchestrator)
+  hosts: all
+  sources:
+    - ansible.eda.webhook:
+        host: 0.0.0.0
+        port: 5000
+
+  rules:
+    - name: Post the push straight to the orchestrator trigger
+      condition: >-
+        event.payload.ref == "refs/heads/main" and
+        event.payload.head_commit is defined
+      action:
+        run_module:
+          name: ansible.builtin.uri
+          module_args:
+            url: "{{ ao_url }}/api/v1/webhooks/eda/{{ ao_webhook_path }}"
+            method: POST
+            headers:
+              Authorization: "Bearer {{ ao_token | default('') }}"
+            body_format: json
+            body:
+              repo_url: "{{ event.payload.repository.clone_url }}"
+              git_ref: "{{ event.payload.after }}"
+              pushed_by: "{{ event.payload.pusher.name }}"
+              commit_message: "{{ event.payload.head_commit.message }}"
+            status_code: [200, 201, 202]
+            validate_certs: false

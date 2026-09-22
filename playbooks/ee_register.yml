@@ -1,0 +1,181 @@
+---
+# Push a freshly built execution environment to the private automation hub
+# container registry, then create or update it in automation controller.
+#
+# Job template: "EE Build | Register EE"  (prompt on launch: extra variables)
+# Inventory:    the inventory holding the build host, limited to that host
+# Credentials:  a machine credential for the build host
+#               + "EE Build Registries" (registry logins)
+#               + a Red Hat Ansible Automation Platform credential (controller API)
+#
+# Required variables (the orchestrator passes them from the build step's artifacts)
+#   ee_name         Execution environment name
+#   ee_tag          Tag of the image that was built
+#   ee_local_image  Local image reference, e.g. localhost/my-ee:main-a0
+- name: Register a built execution environment
+  hosts: "{{ ee_build_host | default('ee-builder') }}"
+  gather_facts: false
+
+  vars:
+    ee_hub_host: ""
+    ee_hub_username: ""
+    ee_hub_password: ""
+    ee_registry_tls_verify: false
+    # Extra tags to publish beside ee_tag.
+    ee_extra_tags:
+      - latest
+    # Controller connection. The AAP credential injects these environment
+    # variables; set the variables directly to override.
+    ee_aap_url: "{{ lookup('ansible.builtin.env', 'CONTROLLER_HOST') }}"
+    ee_aap_token: "{{ lookup('ansible.builtin.env', 'CONTROLLER_OAUTH_TOKEN') }}"
+    ee_aap_username: "{{ lookup('ansible.builtin.env', 'CONTROLLER_USERNAME') }}"
+    ee_aap_password: "{{ lookup('ansible.builtin.env', 'CONTROLLER_PASSWORD') }}"
+    ee_aap_validate_certs: false
+    # Name of the container registry credential in controller that AAP uses to
+    # pull this image.
+    ee_registry_credential_name: local automation hub
+    ee_pull_policy: always
+
+  tasks:
+    - name: Check the required variables
+      ansible.builtin.assert:
+        that:
+          - ee_name | default('', true) | length > 0
+          - ee_tag | default('', true) | length > 0
+          - ee_local_image | default('', true) | length > 0
+          - ee_hub_host | default('', true) | length > 0
+        fail_msg: >-
+          ee_name, ee_tag, ee_local_image and ee_hub_host are required.
+
+    - name: Set the published image references
+      ansible.builtin.set_fact:
+        _remote_image: "{{ ee_hub_host }}/{{ ee_name }}:{{ ee_tag }}"
+        _all_tags: "{{ [ee_tag] + (ee_extra_tags | default([])) }}"
+
+    - name: Log in to the private automation hub registry
+      ansible.builtin.command:
+        argv:
+          - podman
+          - login
+          - "--username={{ ee_hub_username }}"
+          - "--password={{ ee_hub_password }}"
+          - "--tls-verify={{ ee_registry_tls_verify | bool | lower }}"
+          - "{{ ee_hub_host }}"
+      when: ee_hub_username | length > 0
+      changed_when: false
+      no_log: true
+
+    - name: Tag the image for the hub
+      ansible.builtin.command:
+        argv:
+          - podman
+          - tag
+          - "{{ ee_local_image }}"
+          - "{{ ee_hub_host }}/{{ ee_name }}:{{ item }}"
+      loop: "{{ _all_tags }}"
+      changed_when: true
+
+    - name: Push the image to the hub
+      ansible.builtin.command:
+        argv:
+          - podman
+          - push
+          - "--tls-verify={{ ee_registry_tls_verify | bool | lower }}"
+          - "{{ ee_hub_host }}/{{ ee_name }}:{{ item }}"
+      loop: "{{ _all_tags }}"
+      register: _push
+      changed_when: true
+      retries: 2
+      delay: 10
+      until: _push is succeeded
+
+    - name: Talk to automation controller
+      delegate_to: localhost
+      vars:
+        _api: "{{ ee_aap_url | regex_replace('/$', '') }}/api/controller/v2"
+        _headers: >-
+          {{ {'Authorization': 'Bearer ' ~ ee_aap_token}
+             if ee_aap_token | default('', true) | length > 0 else {} }}
+        _user: "{{ omit if ee_aap_token | length > 0 else ee_aap_username }}"
+        _pass: "{{ omit if ee_aap_token | length > 0 else ee_aap_password }}"
+      block:
+        - name: Find the registry credential
+          ansible.builtin.uri:
+            url: "{{ _api }}/credentials/?name={{ ee_registry_credential_name | urlencode }}"
+            headers: "{{ _headers }}"
+            url_username: "{{ _user }}"
+            url_password: "{{ _pass }}"
+            force_basic_auth: "{{ ee_aap_token | length == 0 }}"
+            validate_certs: "{{ ee_aap_validate_certs }}"
+          register: _cred_lookup
+
+        - name: Look for an existing execution environment
+          ansible.builtin.uri:
+            url: "{{ _api }}/execution_environments/?name={{ ee_name | urlencode }}"
+            headers: "{{ _headers }}"
+            url_username: "{{ _user }}"
+            url_password: "{{ _pass }}"
+            force_basic_auth: "{{ ee_aap_token | length == 0 }}"
+            validate_certs: "{{ ee_aap_validate_certs }}"
+          register: _ee_lookup
+
+        - name: Build the execution environment payload
+          ansible.builtin.set_fact:
+            _ee_body: >-
+              {{ {
+                   'name': ee_name,
+                   'image': _remote_image,
+                   'description': 'Built from ' ~ (ee_repo_url | default('the EE definitions repository'))
+                                  ~ ' by the EE build automation',
+                   'pull': ee_pull_policy,
+                 } | combine(
+                   {'credential': (_cred_lookup.json.results | first).id}
+                   if _cred_lookup.json.count | int > 0 else {}) }}
+            _existing_ee: "{{ (_ee_lookup.json.results | first).id if _ee_lookup.json.count | int > 0 else '' }}"
+
+        - name: Create the execution environment
+          ansible.builtin.uri:
+            url: "{{ _api }}/execution_environments/"
+            method: POST
+            headers: "{{ _headers }}"
+            url_username: "{{ _user }}"
+            url_password: "{{ _pass }}"
+            force_basic_auth: "{{ ee_aap_token | length == 0 }}"
+            body_format: json
+            body: "{{ _ee_body }}"
+            status_code: [200, 201]
+            validate_certs: "{{ ee_aap_validate_certs }}"
+          register: _ee_created
+          when: not _existing_ee
+
+        - name: Update the execution environment
+          ansible.builtin.uri:
+            url: "{{ _api }}/execution_environments/{{ _existing_ee }}/"
+            method: PATCH
+            headers: "{{ _headers }}"
+            url_username: "{{ _user }}"
+            url_password: "{{ _pass }}"
+            force_basic_auth: "{{ ee_aap_token | length == 0 }}"
+            body_format: json
+            body: "{{ _ee_body }}"
+            status_code: [200, 201]
+            validate_certs: "{{ ee_aap_validate_certs }}"
+          register: _ee_updated
+          when: _existing_ee | length > 0
+
+    - name: Publish the result for automation orchestrator
+      ansible.builtin.set_stats:
+        aggregate: false
+        per_host: false
+        data:
+          ee_registered_image: "{{ _remote_image }}"
+          ee_registered_tags: "{{ _all_tags }}"
+          ee_controller_id: >-
+            {{ _existing_ee if _existing_ee else (_ee_created.json.id | default('')) }}
+          ee_register_result: success
+
+    - name: Show what was registered
+      ansible.builtin.debug:
+        msg:
+          - "Pushed {{ ee_hub_host }}/{{ ee_name }} tags: {{ _all_tags | join(', ') }}"
+          - "Execution environment '{{ ee_name }}' now points at {{ _remote_image }}"

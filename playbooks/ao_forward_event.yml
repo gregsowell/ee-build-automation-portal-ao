@@ -1,0 +1,174 @@
+---
+# Forward a GitHub push event to the automation orchestrator Event-Driven
+# Ansible trigger on the Build-EE workflow.
+#
+# Job template: "EE Build | Forward Event to AO"  (prompt on launch: extra variables)
+# Inventory:    any inventory with localhost. Credentials: "Automation
+#               Orchestrator Service Account" (custom type).
+#
+# Event-Driven Ansible rulebook actions cannot make HTTP calls themselves, so
+# the rulebook launches this job template and hands it the push payload. This
+# play works out which changed files are execution environment definitions and
+# posts one request per definition to the orchestrator trigger. Each request
+# body becomes the input of one workflow run.
+#
+# Required variables
+#   ee_event            The GitHub push payload (event.payload from the rulebook)
+#   ao_webhook_path     Webhook path of the EDA trigger on the Build-EE workflow
+#
+# Credential-injected variables
+#   ao_url, ao_client_id, ao_client_secret, ao_validate_certs
+- name: Start the Build-EE workflow in automation orchestrator
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    ao_url: "{{ lookup('ansible.builtin.env', 'AO_URL') }}"
+    ao_client_id: "{{ lookup('ansible.builtin.env', 'AO_CLIENT_ID') }}"
+    ao_client_secret: "{{ lookup('ansible.builtin.env', 'AO_CLIENT_SECRET') }}"
+    ao_validate_certs: false
+    ao_webhook_path: ""
+    # Only pushes to this branch start a build.
+    ee_definition_branch: main
+    # A changed YAML file counts as an execution environment definition when it
+    # parses and carries these keys. Those are the ansible-builder v3 basics.
+    ee_definition_required_keys:
+      - version
+    ee_definition_any_keys:
+      - images
+      - dependencies
+    ee_raw_url_base: https://raw.githubusercontent.com
+
+  tasks:
+    - name: Check the required variables
+      ansible.builtin.assert:
+        that:
+          - ee_event is defined
+          - ee_event.repository is defined
+          - ao_webhook_path | default('', true) | length > 0
+          - ao_url | default('', true) | length > 0
+        fail_msg: >-
+          ee_event (the GitHub push payload), ao_webhook_path and ao_url are required.
+
+    - name: Read the push event
+      ansible.builtin.set_fact:
+        _repo_url: "{{ ee_event.repository.clone_url }}"
+        _repo_full_name: "{{ ee_event.repository.full_name }}"
+        _ref: "{{ ee_event.ref | default('') }}"
+        _sha: "{{ ee_event.after | default(ee_event.head_commit.id | default('')) }}"
+        _pusher: "{{ ee_event.pusher.name | default(ee_event.sender.login | default('unknown')) }}"
+        _commit_message: "{{ ee_event.head_commit.message | default('') }}"
+
+    - name: Collect every file the push added or changed
+      ansible.builtin.set_fact:
+        _changed_files: >-
+          {{ (ee_event.commits | default([]) | map(attribute='added') | flatten)
+             + (ee_event.commits | default([]) | map(attribute='modified') | flatten)
+             + (ee_event.head_commit.added | default([]))
+             + (ee_event.head_commit.modified | default([]))
+             | unique }}
+
+    - name: Keep the YAML files
+      ansible.builtin.set_fact:
+        _candidates: >-
+          {{ _changed_files | select('search', '\.ya?ml$')
+             | reject('search', '(^|/)catalog-info\.ya?ml$')
+             | reject('search', '(^|/)\.github/')
+             | list }}
+
+    - name: Stop when the push is not a definition change on {{ ee_definition_branch }}
+      when: _ref != 'refs/heads/' ~ ee_definition_branch or _candidates | length == 0
+      block:
+        - name: Explain why nothing was started
+          ansible.builtin.debug:
+            msg: >-
+              Nothing to build: ref={{ _ref }},
+              changed YAML files={{ _candidates | default([]) | join(', ') | default('none', true) }}
+
+        - name: End the play
+          ansible.builtin.meta: end_play
+
+    # Reading the file settles what it is, instead of guessing from its name.
+    - name: Fetch each changed YAML file at this commit
+      ansible.builtin.uri:
+        url: "{{ ee_raw_url_base }}/{{ _repo_full_name }}/{{ _sha }}/{{ item }}"
+        return_content: true
+        status_code: [200, 404]
+      loop: "{{ _candidates }}"
+      register: _fetched
+      changed_when: false
+
+    - name: Keep the files that are execution environment definitions
+      vars:
+        _parsed: "{{ (item.content | from_yaml) if item.status == 200 else {} }}"
+      ansible.builtin.set_fact:
+        _definitions: >-
+          {{ (_definitions | default([])) + [{
+               'path': item.item,
+               'name': (item.item | dirname | basename)
+                       if (item.item | basename | splitext | first) in ['execution-environment', 'ee']
+                       else (item.item | basename | splitext | first),
+             }] }}
+      when:
+        - item.status == 200
+        - (item.content | from_yaml) is mapping
+        - ee_definition_required_keys | difference((item.content | from_yaml).keys() | list) | length == 0
+        - ee_definition_any_keys | intersect((item.content | from_yaml).keys() | list) | length > 0
+      loop: "{{ _fetched.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Stop when no changed file is an execution environment definition
+      when: _definitions | default([]) | length == 0
+      block:
+        - name: Say so
+          ansible.builtin.debug:
+            msg: "No execution environment definitions in this push."
+
+        - name: End the play
+          ansible.builtin.meta: end_play
+
+    - name: Get an orchestrator service account token
+      ansible.builtin.uri:
+        url: "{{ ao_url | regex_replace('/$', '') }}/api/v1/auth/token"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          grant_type: client_credentials
+          client_id: "{{ ao_client_id }}"
+          client_secret: "{{ ao_client_secret }}"
+        status_code: [200, 201]
+        validate_certs: "{{ ao_validate_certs }}"
+      register: _ao_token
+      no_log: true
+      when: ao_client_id | default('', true) | length > 0
+
+    - name: Start one workflow run per definition
+      ansible.builtin.uri:
+        url: "{{ ao_url | regex_replace('/$', '') }}/api/v1/webhooks/eda/{{ ao_webhook_path }}"
+        method: POST
+        headers: >-
+          {{ {'Authorization': 'Bearer ' ~ _ao_token.json.access_token}
+             if ao_client_id | default('', true) | length > 0 else {} }}
+        body_format: json
+        body:
+          ee_name: "{{ item.name }}"
+          repo_url: "{{ _repo_url }}"
+          git_ref: "{{ _sha }}"
+          definition_path: "{{ item.path }}"
+          pushed_by: "{{ _pusher }}"
+          commit_message: "{{ _commit_message }}"
+        status_code: [200, 201, 202]
+        validate_certs: "{{ ao_validate_certs }}"
+      loop: "{{ _definitions }}"
+      loop_control:
+        label: "{{ item.path }}"
+      register: _started
+
+    - name: Show what was started
+      ansible.builtin.debug:
+        msg: >-
+          Started {{ _definitions | length }} Build-EE run(s) for
+          {{ _definitions | map(attribute='name') | join(', ') }}
+          at {{ _sha[:7] }} pushed by {{ _pusher }}.
