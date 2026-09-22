@@ -1,0 +1,76 @@
+---
+# Stage the AI-corrected execution environment definition for the next build.
+#
+# Job template: "EE Build | Apply AI Fix"  (prompt on launch: extra variables)
+# Inventory:    the inventory holding the build host, limited to that host
+# Credentials:  a machine credential for the build host
+#
+# Why this step exists: automation orchestrator refuses any reference to a step
+# that has not run yet, and it has no default-value syntax. So the build step
+# cannot reference the AI step on the first attempt. Instead the AI step hands
+# its YAML to this job, which writes it to a scratch file on the build host,
+# and the next build picks that file up on its own. Nothing is written to Git.
+#
+# Required variables
+#   ee_name                Execution environment name
+#   ee_git_ref             The commit or branch being built
+#   ee_definition_override The corrected definition from the AI step
+- name: Stage an AI-corrected execution environment definition
+  hosts: "{{ ee_build_host | default('ee-builder') }}"
+  gather_facts: false
+
+  vars:
+    ee_workdir_base: /var/tmp/ee-builds
+    ee_git_ref: main
+    ee_definition_override: ""
+
+  tasks:
+    - name: Check the required variables
+      ansible.builtin.assert:
+        that:
+          - ee_name | default('', true) | length > 0
+          - ee_definition_override | default('', true) | trim | length > 0
+          - not (ee_definition_override | trim).startswith('${')
+        fail_msg: >-
+          ee_name and a non-empty ee_definition_override are required. An
+          unresolved ${...} reference means the AI step did not run.
+
+    - name: Work out where the next build looks for a fix
+      ansible.builtin.set_fact:
+        _fix_dir: "{{ ee_workdir_base }}/.fixes"
+        _ref_short: "{{ ee_git_ref | regex_replace('[^A-Za-z0-9]', '-') | truncate(12, true, '') }}"
+
+    - name: Create the fix directory
+      ansible.builtin.file:
+        path: "{{ _fix_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Check the corrected definition is valid YAML
+      ansible.builtin.assert:
+        that:
+          - (ee_definition_override | from_yaml) is mapping
+          - (ee_definition_override | from_yaml).version is defined
+        fail_msg: >-
+          The corrected definition is not a valid execution environment file.
+
+    - name: Write the corrected definition
+      ansible.builtin.copy:
+        content: "{{ ee_definition_override }}"
+        dest: "{{ _fix_dir }}/{{ ee_name }}-{{ _ref_short }}.yml"
+        mode: "0644"
+
+    - name: Publish the result for automation orchestrator
+      ansible.builtin.set_stats:
+        aggregate: false
+        per_host: false
+        data:
+          ee_fix_applied: true
+          ee_fix_path: "{{ _fix_dir }}/{{ ee_name }}-{{ _ref_short }}.yml"
+
+    - name: Say what was staged
+      ansible.builtin.debug:
+        msg: >-
+          Staged a corrected definition for {{ ee_name }} at
+          {{ _fix_dir }}/{{ ee_name }}-{{ _ref_short }}.yml.
+          The next build will use it instead of the file in the repository.

@@ -27,6 +27,7 @@
     ao_credential_name: Automation Orchestrator Service Account
     ee_build_job_template: EE Build | Build Image
     ee_register_job_template: EE Build | Register EE
+    ee_apply_fix_job_template: EE Build | Apply AI Fix
     ee_notify_job_template: EE Build | Notify
     ee_forward_job_template: EE Build | Forward Event to AO
     ee_prep_job_template: EE Build | Prep Builder Host
@@ -308,6 +309,15 @@
           limit: "{{ ee_build_host_limit }}"
           ask_variables_on_launch: true
           timeout: 3600
+        - name: "{{ ee_apply_fix_job_template }}"
+          description: Stages the AI-corrected definition on the build host for the next attempt.
+          job_type: run
+          organization: "{{ _org_id | int }}"
+          inventory: "{{ _build_inventory_id | int }}"
+          project: "{{ _project_id | int }}"
+          playbook: playbooks/ee_apply_fix.yml
+          limit: "{{ ee_build_host_limit }}"
+          ask_variables_on_launch: true
         - name: "{{ ee_notify_job_template }}"
           description: Reports the outcome of an execution environment build.
           job_type: run
@@ -350,6 +360,8 @@
           credentials: >-
             {{ [_machine_credential_id, _registry_credential_id]
                + ([_aap_credential_id] if _aap_credential_id | length > 0 else []) }}
+        - name: "{{ ee_apply_fix_job_template }}"
+          credentials: "{{ [_machine_credential_id] }}"
         - name: "{{ ee_notify_job_template }}"
           credentials: []
         - name: "{{ ee_forward_job_template }}"

@@ -16,7 +16,8 @@ flowchart TD
     F --> G[EE Build: Build Image<br/>ansible-builder on the build host]
     G --> H{Build succeeded?}
     H -->|no| I[AI repair agent<br/>rewrites the definition]
-    I -->|retry recommended| G
+    I -->|retry recommended| S[Stage the fix<br/>on the build host]
+    S --> G
     I -->|no| N[EE Build: Notify]
     H -->|yes, AI was involved| J[Human approval]
     H -->|yes, first try| K[EE Build: Register EE]
@@ -26,9 +27,17 @@ flowchart TD
     K --> M[Execution environment<br/>in AAP]
 ```
 
-The corrected definition lives in orchestrator workflow variables while the loop
-runs, so nothing is written back to Git during a build. What you merged stays
-what is in `main` until you choose to put the fix there.
+The corrected definition never reaches Git. It is passed from the AI step to a
+staging step, which writes it to a scratch file on the build host that the next
+attempt picks up. What you merged stays what is in `main` until you choose to
+put the fix there.
+
+**Why a staging step rather than a workflow variable:** the orchestrator refuses
+any reference to a step that has not run yet, and it has no default-value
+syntax, so the build step cannot reference the AI step on the first attempt. It
+also exposes no execution ID to a step and, on this deployment, script steps are
+disabled. Staging the file is what is left, and it keeps the loop free of
+cross-step references.
 
 ## What is in here
 
@@ -36,6 +45,7 @@ what is in `main` until you choose to put the fix there.
 |---|---|
 | `playbooks/ee_build.yml` | Builds the image with `ansible-builder`. Reports the outcome through `set_stats` instead of failing, so the orchestrator can read the log and retry. |
 | `playbooks/ee_register.yml` | Pushes the image to private automation hub and creates or updates the execution environment in AAP. |
+| `playbooks/ee_apply_fix.yml` | Writes the AI-corrected definition to a scratch file on the build host, which the next build picks up. |
 | `playbooks/ee_notify.yml` | Reports a build that failed, was rejected, or that the agent would not retry. |
 | `playbooks/ao_forward_event.yml` | Turns a GitHub push into one orchestrator trigger call per changed definition. |
 | `playbooks/ee_builder_prep.yml` | Installs podman and `ansible-builder` on the build host. Run once. |
@@ -88,7 +98,7 @@ Then:
 |---|---|
 | The build succeeds on the first attempt | The image is registered. No approval needed. |
 | The build fails | The agent gets the definition that was built and the tail of the build log, and returns a corrected definition plus a structured diagnosis. |
-| The agent recommends a retry | The loop runs the build again with the corrected definition in `ee_definition_override`. |
+| The agent recommends a retry | The staging step writes the corrected definition to the build host, and the loop builds again from it. |
 | The agent will not retry, or the fix touches credentials, a registry or the base image | The workflow stops and notifies instead of burning attempts. |
 | A build succeeds after the agent changed something | A human approves before the image is published. |
 | Four attempts pass with no working build | The workflow notifies. |

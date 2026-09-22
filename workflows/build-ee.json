@@ -83,8 +83,7 @@
           "ee_repo_url": "${trigger.repo_url}",
           "ee_git_ref": "${trigger.git_ref}",
           "ee_definition_path": "${trigger.definition_path}",
-          "build_attempt": "${loop_until_built.iteration_count}",
-          "ee_definition_override": "${ai_repair.updated_execution_environment_yml}"
+          "build_attempt": "${loop_until_built.iteration_count}"
         }
       },
       "position": {
@@ -322,6 +321,27 @@
         "x": 685.0264776325732,
         "y": -83.56839356278786
       }
+    },
+    {
+      "id": "apply_ai_fix",
+      "type": "aap_job_template",
+      "name": "Stage AI Fix For Next Build",
+      "parameters": {
+        "diff_mode": false,
+        "credential_id": "CREDENTIAL_ID_PLACEHOLDER",
+        "integration_id": "INTEGRATION_ID_PLACEHOLDER",
+        "job_template_name": "EE Build | Apply AI Fix",
+        "organization_name": "Default",
+        "extra_vars": {
+          "ee_name": "${build_ee.artifacts.ee_name}",
+          "ee_git_ref": "${build_ee.artifacts.ee_git_ref}",
+          "ee_definition_override": "${ai_repair.updated_execution_environment_yml}"
+        }
+      },
+      "position": {
+        "x": 2150,
+        "y": 660
+      }
     }
   ],
   "edges": [
@@ -346,12 +366,6 @@
     {
       "from": "ai_repair",
       "to": "check_ai_recommends_retry"
-    },
-    {
-      "from": "check_ai_recommends_retry",
-      "to": "loop_until_built",
-      "from_port": "true",
-      "to_port": "iterate"
     },
     {
       "from": "check_ai_recommends_retry",
@@ -387,6 +401,16 @@
       "from": "human_approval",
       "to": "notify_failure",
       "from_port": "rejected"
+    },
+    {
+      "from": "check_ai_recommends_retry",
+      "to": "apply_ai_fix",
+      "from_port": "true"
+    },
+    {
+      "from": "apply_ai_fix",
+      "to": "loop_until_built",
+      "to_port": "iterate"
     }
   ]
 }

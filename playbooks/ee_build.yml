@@ -20,8 +20,10 @@
 #   ee_git_ref             Branch, tag or commit to build. Default: main
 #   ee_name                EE name. Default: derived from ee_definition_path
 #   ee_definition_override Full YAML to write over the definition before
-#                          building. Used by the AI repair loop. Ignored when
-#                          empty or still an unresolved ${...} reference.
+#                          building. Ignored when empty or still an unresolved
+#                          ${...} reference. When it is not set and this is a
+#                          retry, the build uses the file that
+#                          "EE Build | Apply AI Fix" staged for this EE and ref.
 #   build_attempt          Loop iteration number, used in the image tag
 - name: Build an execution environment image
   hosts: "{{ ee_build_host | default('ee-builder') }}"
@@ -67,10 +69,11 @@
                else _file_stem, true) }}
         _ref_short: "{{ ee_git_ref | default('main', true) | regex_replace('[^A-Za-z0-9]', '-') | truncate(12, true, '') }}"
 
-    - name: Set the build directory and tag
+    - name: Set the build directory, tag and staged fix path
       ansible.builtin.set_fact:
         _build_dir: "{{ ee_workdir_base }}/{{ _ee_name }}-{{ _ref_short }}"
         _ee_tag: "{{ _ref_short }}-a{{ build_attempt }}"
+        _fix_file: "{{ ee_workdir_base }}/.fixes/{{ _ee_name }}-{{ _ref_short }}.yml"
 
     - name: Make sure the build directory's parent exists
       ansible.builtin.file:
@@ -102,16 +105,50 @@
       when: not _definition_stat.stat.exists
 
     # An unresolved orchestrator reference arrives as the literal "${...}".
-    - name: Decide whether the AI supplied a replacement definition
+    - name: Decide whether a replacement definition was passed in
       ansible.builtin.set_fact:
-        _use_override: >-
+        _passed_override: >-
           {{ ee_definition_override | default('', true) | trim | length > 0
              and not (ee_definition_override | trim).startswith('${')
              and 'null' != (ee_definition_override | trim) }}
 
+    - name: Look for a definition staged by the AI repair step
+      ansible.builtin.stat:
+        path: "{{ _fix_file }}"
+      register: _fix_stat
+
+    # A staged fix belongs to one run of the repair loop. On a first attempt it
+    # is left over from an earlier run, so it is removed rather than used.
+    - name: Discard a stale staged fix on the first attempt
+      ansible.builtin.file:
+        path: "{{ _fix_file }}"
+        state: absent
+      when:
+        - build_attempt | int == 0
+        - _fix_stat.stat.exists
+
+    - name: Use the staged fix on a retry
+      ansible.builtin.slurp:
+        src: "{{ _fix_file }}"
+      register: _fix_content
+      when:
+        - not (_passed_override | bool)
+        - build_attempt | int > 0
+        - _fix_stat.stat.exists
+
+    - name: Settle which definition is being built
+      ansible.builtin.set_fact:
+        _override_content: >-
+          {{ ee_definition_override if _passed_override | bool
+             else (_fix_content.content | b64decode if _fix_content.content is defined else '') }}
+
+    - name: Note whether the definition was replaced
+      ansible.builtin.set_fact:
+        _use_override: "{{ _override_content | trim | length > 0 }}"
+
     - name: Write the AI-corrected definition over {{ ee_definition_path }}
       ansible.builtin.copy:
-        content: "{{ ee_definition_override }}"
+        content: "{{ _override_content }}"
         dest: "{{ _definition_file }}"
         mode: "0644"
       when: _use_override | bool
@@ -205,6 +242,12 @@
       ansible.builtin.set_fact:
         _build_rc: "{{ _build.rc }}"
         _build_log_text: "{{ _build_log.stdout | default(_build.stdout | default('')) }}"
+
+    - name: Remove the staged fix once the build works
+      ansible.builtin.file:
+        path: "{{ _fix_file }}"
+        state: absent
+      when: _build_rc | int == 0
 
     - name: Publish the result for automation orchestrator
       ansible.builtin.set_stats:
