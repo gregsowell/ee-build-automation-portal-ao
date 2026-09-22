@@ -495,6 +495,9 @@
           vars:
             upsert_api: "{{ _eda_api }}"
             upsert_path: activations
+            # A running activation cannot be patched. Delete it in the UI, or
+            # set eda_replace_activation, to pick up a changed rulebook.
+            upsert_skip_update: "{{ not (eda_replace_activation | default(false) | bool) }}"
             upsert_body:
               name: "{{ eda_activation_name }}"
               description: Starts a Build-EE run when an EE definition lands on main.
@@ -517,6 +520,9 @@
           vars:
             upsert_api: "{{ _eda_api }}"
             upsert_path: activations
+            # A running activation cannot be patched. Delete it in the UI, or
+            # set eda_replace_activation, to pick up a changed rulebook.
+            upsert_skip_update: "{{ not (eda_replace_activation | default(false) | bool) }}"
             upsert_body:
               name: "{{ eda_activation_name }}"
               description: Starts a Build-EE run when an EE definition lands on main.
