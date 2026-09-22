@@ -59,7 +59,7 @@
       "name": "Loop Until Working",
       "parameters": {
         "type": "do_while",
-        "condition": "(${check_build_succeeded.evaluated_result} == false or ${loop_until_built.iteration_count} == 0)",
+        "condition": "${build_ee.artifacts.ee_build_result} != 'success'",
         "max_iterations": 4
       },
       "settings": {},
@@ -108,7 +108,7 @@
       "type": "agentic",
       "name": "AI Repair EE Build Failure",
       "parameters": {
-        "prompt": "You are an Ansible execution environment (EE) build engineer. An ansible-builder build of an execution environment failed. Diagnose the failure and propose the smallest change to the EE definition that will make the next build succeed.\n\nBuild job:\n- Job ID: ${build_ee.job_id}\n- Status: ${build_ee.job_status}\n- Job URL: ${build_ee.job_url}\n- Build attempt: ${loop_until_built.iteration_count}\n\nExecution environment:\n- Name: ${build_ee.artifacts.ee_name}\n- Definition file: ${build_ee.artifacts.ee_definition_path}\n- Repository: ${build_ee.artifacts.ee_repo_url} at ${build_ee.artifacts.ee_git_ref}\n- This definition came from: ${build_ee.artifacts.ee_definition_source} (repository means it is the file as pushed; ai_override means it is your own previous correction)\n\nThe exact definition content that was built (ansible-builder version 3 format):\n${build_ee.artifacts.ee_definition}\n\nThe end of the ansible-builder and podman build log:\n${build_ee.artifacts.ee_build_log_tail}\n\nInstructions:\n1. Base your analysis only on the job data above. Do not invent errors that are not in the log. If the log does not contain enough detail to identify the cause, set failure_category to \"insufficient_data\", describe what is missing in root_cause, and set retry_recommended to false.\n2. Find the first real error in the build log. Ignore later errors that cascade from it.\n3. Classify the failure using the failure_category values.\n4. Propose the smallest set of changes that fixes it. Typical fixes: pin or relax a Python package version, add a missing system package to the system dependencies, correct a Galaxy collection name or version, change the base image, or add a build step. Only remove a dependency if it is the cause.\n5. If this definition is already one of your corrections and the same error is back, try a different approach rather than repeating the previous change.\n6. Quote the log lines that show the root cause verbatim in error_excerpt.\n7. Return the complete corrected definition in updated_execution_environment_yml, as valid YAML with no markdown fences, so the next build can write it straight over the definition file.\n8. Set retry_recommended to true only if you are confident the change addresses the root cause. Set requires_human_review to true if the fix involves credentials, registry authentication, network access, or a base image change.",
+        "prompt": "You are an Ansible execution environment (EE) build engineer. An ansible-builder build of an execution environment failed. Diagnose the failure and propose the smallest change to the EE definition that will make the next build succeed.\n\nBuild job:\n- Job ID: ${build_ee.job_id}\n- Status: ${build_ee.job_status}\n- Job URL: ${build_ee.job_url}\n- Build attempt: ${loop_until_built.iteration_count}\n\nExecution environment:\n- Name: ${build_ee.artifacts.ee_name}\n- Definition file: ${build_ee.artifacts.ee_definition_path}\n- Repository: ${build_ee.artifacts.ee_repo_url} at ${build_ee.artifacts.ee_git_ref}\n- This definition came from: ${build_ee.artifacts.ee_definition_source} (repository means it is the file as pushed; ai_override means it is your own previous correction)\n\nThe exact definition content that was built (ansible-builder version 3 format):\n${build_ee.artifacts.ee_definition}\n\nThe end of the ansible-builder and podman build log:\n${build_ee.artifacts.ee_build_log_tail}\n\nInstructions:\n1. Base your analysis only on the job data above. Do not invent errors that are not in the log. If the log does not contain enough detail to identify the cause, set failure_category to \"insufficient_data\", describe what is missing in root_cause, and answer retry_recommended with \"no\".\n2. Find the first real error in the build log. Ignore later errors that cascade from it.\n3. Classify the failure using the failure_category values.\n4. Propose the smallest set of changes that fixes it. Typical fixes: pin or relax a Python package version, add a missing system package to the system dependencies, correct a Galaxy collection name or version, change the base image, or add a build step. Only remove a dependency if it is the cause.\n5. If this definition is already one of your corrections and the same error is back, try a different approach rather than repeating the previous change.\n6. Quote the log lines that show the root cause verbatim in error_excerpt.\n7. Return the complete corrected definition in updated_execution_environment_yml, as valid YAML with no markdown fences, so the next build can write it straight over the definition file.\n8. Answer retry_recommended with \"yes\" only if you are confident the change addresses the root cause, otherwise \"no\". Answer requires_human_review with \"yes\" if the fix involves credentials, registry authentication, network access, or a base image change, otherwise \"no\".",
         "response_schema": {
           "type": "object",
           "required": [
@@ -209,12 +209,20 @@
               "description": "Primary cause of the build failure."
             },
             "retry_recommended": {
-              "type": "boolean",
-              "description": "True when the build should be retried with the updated definition."
+              "enum": [
+                "yes",
+                "no"
+              ],
+              "type": "string",
+              "description": "yes when the build should be retried with the updated definition."
             },
             "requires_human_review": {
-              "type": "boolean",
-              "description": "True when the fix touches credentials, registry authentication, network access, or the base image."
+              "enum": [
+                "yes",
+                "no"
+              ],
+              "type": "string",
+              "description": "yes when the fix touches credentials, registry authentication, network access, or the base image."
             },
             "updated_execution_environment_yml": {
               "type": "string",
@@ -235,7 +243,7 @@
       "type": "condition",
       "name": "AI Recommends Retry",
       "parameters": {
-        "condition": "${ai_repair.retry_recommended} == true and ${ai_repair.requires_human_review} != true"
+        "condition": "${ai_repair.retry_recommended} == 'yes' and ${ai_repair.requires_human_review} == 'no'"
       },
       "position": {
         "x": 1800,
