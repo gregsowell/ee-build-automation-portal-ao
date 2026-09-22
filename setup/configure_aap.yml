@@ -348,11 +348,8 @@
       loop_control:
         label: "{{ item.name }}"
 
-    - name: Look up the job templates again to attach credentials
-      ansible.builtin.uri:
-        url: "{{ _controller_api }}/job_templates/?name={{ item.name | urlencode }}"
-        headers: "{{ _api_headers }}"
-        validate_certs: "{{ aap_validate_certs }}"
+    - name: Set the credentials on each job template
+      ansible.builtin.include_tasks: tasks/set_job_template_credentials.yml
       loop:
         - name: "{{ ee_build_job_template }}"
           credentials: "{{ [_machine_credential_id, _registry_credential_id] }}"
@@ -369,22 +366,8 @@
         - name: "{{ ee_prep_job_template }}"
           credentials: "{{ [_machine_credential_id] }}"
       loop_control:
-        label: "{{ item.name }}"
-      register: _jt_lookup
-
-    - name: Attach the credentials to each job template
-      ansible.builtin.uri:
-        url: "{{ _controller_api }}/job_templates/{{ item.0.json.results[0].id }}/credentials/"
-        method: POST
-        headers: "{{ _api_headers }}"
-        body_format: json
-        # The ID has to stay an integer, so build the body as a dict.
-        body: "{{ {'id': item.1 | int} }}"
-        status_code: [200, 201, 204]
-        validate_certs: "{{ aap_validate_certs }}"
-      loop: "{{ _jt_lookup.results | subelements('item.credentials') }}"
-      loop_control:
-        label: "{{ item.0.item.name }} <- credential {{ item.1 }}"
+        loop_var: jt_credentials
+        label: "{{ jt_credentials.name }}"
 
     # ------------------------------------------------------------------- EDA
     - name: Create the EDA project
