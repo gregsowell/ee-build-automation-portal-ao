@@ -251,6 +251,11 @@
               ansible.builtin.copy:
                 content: |
                   [galaxy]
+                  {% if not ee_galaxy_validate_certs | bool %}
+                  # Per-server validate_certs covers API calls but not artifact
+                  # downloads, which honour this instead.
+                  ignore_certs = true
+                  {% endif %}
                   server_list = {{ (ee_galaxy_repositories
                                     | map('regex_replace', '-', '_')
                                     | map('regex_replace', '^', 'hub_') | list

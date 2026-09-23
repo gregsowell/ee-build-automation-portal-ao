@@ -130,6 +130,14 @@ Then:
   server rather than in list order, so an unapproved public release can beat
   the one in your hub. A collection missing from the hub fails the build, and
   the agent's diagnosis says so.
+- **`validate_certs` per galaxy server is not enough.** It covers API calls;
+  collection *downloads* honour `[galaxy] ignore_certs`. A hub whose
+  certificate a base image cannot chain fails at download time with
+  "unable to get local issuer certificate" even though discovery worked.
+- **Definitions from the portal set `source:` to a server alias**, which
+  `ansible-galaxy` rejects: it wants an HTTP Galaxy URL there. The agent strips
+  those and lets the configured server list resolve the collections, so the
+  chain self-corrects, but it costs a build attempt.
 - **Base images need an explicit tag.** `registry.redhat.io` rejects `latest`
   for the ee-minimal repositories.
 
