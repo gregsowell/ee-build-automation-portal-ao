@@ -81,7 +81,49 @@ ready.
 The cloud-init reference for the appliance also accepts `integrations.github.*`
 at first boot.
 
-## 4. Build a definition
+## 4. Point the portal at private automation hub
+
+Without this the portal's **Collections** page says *No content sources
+configured* and the builder has nothing to offer. Add to
+`app-config.production.yaml`, under `catalog.providers.rhaap.production.sync`:
+
+```yaml
+        pahCollections:
+          enabled: true
+          repositories:
+            - name: rh-certified
+              schedule:
+                frequency: {hours: 6}
+                timeout: {minutes: 60}
+            - name: validated
+              schedule:
+                frequency: {hours: 6}
+                timeout: {minutes: 60}
+            - name: published
+              schedule:
+                frequency: {hours: 6}
+                timeout: {minutes: 60}
+            - name: community
+              schedule:
+                frequency: {hours: 6}
+                timeout: {minutes: 60}
+```
+
+It reuses the AAP connection the portal already has, so no extra credentials.
+Restart, then watch it work:
+
+```bash
+sudo journalctl -u portal -f | grep PAHCollectionProvider
+```
+
+Each repository logs `Fetched N collections`. An empty repository is fine; it
+just contributes nothing.
+
+There is a second provider, `ansibleGitContents`, that crawls GitHub or GitLab
+organizations for `galaxy.yml` files. It is off here, since the hub is the
+approved source.
+
+## 5. Build a definition
 
 In the portal: **Create** > the execution environment template > fill in the
 collections, Python and system dependencies > choose to publish to source

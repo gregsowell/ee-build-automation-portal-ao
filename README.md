@@ -91,6 +91,8 @@ Then:
 5. Send a test push and confirm the event arrives, then take the event stream
    out of test mode so events reach the activation.
 6. Configure the portal, as described in [portal/README.md](portal/README.md).
+   That covers both the GitHub publishing side and pointing the portal's
+   collection catalog at private automation hub.
 7. Stock the hub if it is thin: `ansible-playbook setup/sync_hub_collections.yml
    -e @secrets.yml`. Builds only see what the hub holds.
 8. Give the workflow's AI step an LLM provider in the orchestrator:
