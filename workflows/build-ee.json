@@ -238,18 +238,6 @@
       }
     },
     {
-      "id": "check_ai_recommends_retry",
-      "type": "condition",
-      "name": "AI Recommends Retry",
-      "parameters": {
-        "condition": "${ai_repair.result.content.retry_recommended} == 'yes' and ${ai_repair.result.content.requires_human_review} == 'no'"
-      },
-      "position": {
-        "x": 1800,
-        "y": 660
-      }
-    },
-    {
       "id": "check_ai_modified_definition",
       "type": "condition",
       "name": "Did AI Modify EE Files",
@@ -266,7 +254,7 @@
       "type": "approval",
       "name": "Human Approval",
       "parameters": {
-        "prompt": "An AI agent modified the execution environment definition for ${build_ee.artifacts.ee_name} and the build then succeeded.\n\nWhat it changed: ${ai_repair.result.content.summary}\nRoot cause: ${ai_repair.result.content.root_cause}\n\nThe definition that was built:\n${build_ee.artifacts.ee_definition}\n\nApprove to push this image to private automation hub and register it in Ansible Automation Platform.",
+        "prompt": "An AI agent modified the execution environment definition for ${build_ee.artifacts.ee_name} and the build then succeeded.\n\nWhat it changed: ${apply_ai_fix.artifacts.ee_ai_summary}\nRoot cause: ${apply_ai_fix.artifacts.ee_ai_root_cause}\n\nThe definition that was built:\n${build_ee.artifacts.ee_definition}\n\nApprove to push this image to private automation hub and register it in Ansible Automation Platform.",
         "fallback_decision": "reject",
         "decision_window": 14400,
         "approver_users": [
@@ -313,14 +301,14 @@
         "organization_name": "Default",
         "extra_vars": {
           "ee_name": "${build_ee.artifacts.ee_name}",
-          "ee_notify_reason": "build_failed",
+          "ee_notify_reason": "${apply_ai_fix.artifacts.ee_fix_reason}",
           "ee_definition_path": "${build_ee.artifacts.ee_definition_path}",
           "ee_repo_url": "${build_ee.artifacts.ee_repo_url}",
           "ee_git_ref": "${build_ee.artifacts.ee_git_ref}",
           "ee_build_attempt": "${loop_until_built.iteration_count}",
           "ee_build_log_tail": "${build_ee.artifacts.ee_build_log_tail}",
-          "ee_ai_summary": "${ai_repair.result.content.summary}",
-          "ee_ai_root_cause": "${ai_repair.result.content.root_cause}",
+          "ee_ai_summary": "${apply_ai_fix.artifacts.ee_ai_summary}",
+          "ee_ai_root_cause": "${apply_ai_fix.artifacts.ee_ai_root_cause}",
           "ee_job_url": "${build_ee.job_url}"
         }
       },
@@ -342,7 +330,7 @@
         "extra_vars": {
           "ee_name": "${build_ee.artifacts.ee_name}",
           "ee_git_ref": "${build_ee.artifacts.ee_git_ref}",
-          "ee_definition_override": "${ai_repair.result.content.updated_execution_environment_yml}"
+          "ee_agent_answer": "${ai_repair.result.content}"
         }
       },
       "position": {
@@ -360,6 +348,18 @@
       "position": {
         "x": 360,
         "y": -90
+      }
+    },
+    {
+      "id": "check_fix_staged",
+      "type": "condition",
+      "name": "Fix Staged For Retry",
+      "parameters": {
+        "condition": "${apply_ai_fix.artifacts.ee_fix_applied} == 'true'"
+      },
+      "position": {
+        "x": 2150,
+        "y": 480
       }
     }
   ],
@@ -380,15 +380,6 @@
     {
       "from": "check_build_succeeded",
       "to": "ai_repair",
-      "from_port": "false"
-    },
-    {
-      "from": "ai_repair",
-      "to": "check_ai_recommends_retry"
-    },
-    {
-      "from": "check_ai_recommends_retry",
-      "to": "notify_failure",
       "from_port": "false"
     },
     {
@@ -417,16 +408,6 @@
       "from_port": "rejected"
     },
     {
-      "from": "check_ai_recommends_retry",
-      "to": "apply_ai_fix",
-      "from_port": "true"
-    },
-    {
-      "from": "apply_ai_fix",
-      "to": "loop_until_built",
-      "to_port": "iterate"
-    },
-    {
       "from": "loop_until_built",
       "to": "check_gave_up",
       "from_port": "complete"
@@ -435,6 +416,25 @@
       "from": "check_gave_up",
       "to": "notify_failure",
       "from_port": "true"
+    },
+    {
+      "from": "ai_repair",
+      "to": "apply_ai_fix"
+    },
+    {
+      "from": "apply_ai_fix",
+      "to": "check_fix_staged"
+    },
+    {
+      "from": "check_fix_staged",
+      "to": "loop_until_built",
+      "from_port": "true",
+      "to_port": "iterate"
+    },
+    {
+      "from": "check_fix_staged",
+      "to": "notify_failure",
+      "from_port": "false"
     }
   ]
 }

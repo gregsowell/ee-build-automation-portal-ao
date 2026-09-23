@@ -1,20 +1,26 @@
 ---
-# Stage the AI-corrected execution environment definition for the next build.
+# Read the AI agent's answer and stage its corrected definition for the next
+# build attempt.
 #
 # Job template: "EE Build | Apply AI Fix"  (prompt on launch: extra variables)
 # Inventory:    the inventory holding the build host, limited to that host
 # Credentials:  a machine credential for the build host
 #
 # Why this step exists: automation orchestrator refuses any reference to a step
-# that has not run yet, and it has no default-value syntax. So the build step
-# cannot reference the AI step on the first attempt. Instead the AI step hands
-# its YAML to this job, which writes it to a scratch file on the build host,
-# and the next build picks that file up on its own. Nothing is written to Git.
+# that has not run yet and has no default-value syntax, so the build step cannot
+# reference the AI step on the first attempt. The AI hands its answer here, this
+# writes the YAML to a scratch file on the build host, and the next build picks
+# it up. Nothing is written to Git.
+#
+# It also decides whether to retry at all, because the agent's answer arrives
+# as a dict on one run and a JSON string on the next, which no orchestrator
+# condition can read reliably. The verdict comes back as the ee_fix_applied
+# artifact, which the workflow branches on.
 #
 # Required variables
-#   ee_name                Execution environment name
-#   ee_git_ref             The commit or branch being built
-#   ee_definition_override The corrected definition from the AI step
+#   ee_name           Execution environment name
+#   ee_agent_answer   The agent step's result content
+#   ee_git_ref        The commit or branch being built
 - name: Stage an AI-corrected execution environment definition
   hosts: "{{ ee_build_host | default('ee-builder') }}"
   gather_facts: false
@@ -22,55 +28,110 @@
   vars:
     ee_workdir_base: /var/tmp/ee-builds
     ee_git_ref: main
-    ee_definition_override: ""
+    ee_agent_answer: ""
+    # Retry even when the agent flags the fix as needing a human.
+    ee_ignore_human_review: false
 
   tasks:
     - name: Check the required variables
       ansible.builtin.assert:
         that:
           - ee_name | default('', true) | length > 0
-          - ee_definition_override | default('', true) | trim | length > 0
-          - not (ee_definition_override | trim).startswith('${')
+          - ee_agent_answer | string | trim | length > 0
+          - not (ee_agent_answer | string | trim).startswith('${')
         fail_msg: >-
-          ee_name and a non-empty ee_definition_override are required. An
-          unresolved ${...} reference means the AI step did not run.
+          ee_name and ee_agent_answer are required. An unresolved ${...}
+          reference means the AI step did not run.
 
-    - name: Work out where the next build looks for a fix
+    - name: Read the agent's answer
       ansible.builtin.set_fact:
-        _fix_dir: "{{ ee_workdir_base }}/.fixes"
-        _ref_short: "{{ ee_git_ref | regex_replace('[^A-Za-z0-9]', '-') | truncate(12, true, '') }}"
+        _answer: >-
+          {{ ee_agent_answer if ee_agent_answer is mapping
+             else (ee_agent_answer | from_json) }}
+      register: _parsed
+      ignore_errors: true
 
-    - name: Create the fix directory
-      ansible.builtin.file:
-        path: "{{ _fix_dir }}"
-        state: directory
-        mode: "0755"
+    - name: Stop when the answer cannot be read
+      when: _parsed is failed
+      block:
+        - name: Report that the answer was unreadable
+          ansible.builtin.set_stats:
+            aggregate: false
+            per_host: false
+            data:
+              ee_fix_applied: false
+              ee_fix_reason: unreadable_answer
+              ee_ai_summary: The agent's answer was neither an object nor JSON.
 
-    - name: Check the corrected definition is valid YAML
-      ansible.builtin.assert:
-        that:
-          - (ee_definition_override | from_yaml) is mapping
-          - (ee_definition_override | from_yaml).version is defined
-        fail_msg: >-
-          The corrected definition is not a valid execution environment file.
+        - name: End the play
+          ansible.builtin.meta: end_play
 
-    - name: Write the corrected definition
-      ansible.builtin.copy:
-        content: "{{ ee_definition_override }}"
-        dest: "{{ _fix_dir }}/{{ ee_name }}-{{ _ref_short }}.yml"
-        mode: "0644"
+    - name: Pull out the fields the workflow needs
+      vars:
+        _yes: ["yes", "true", "True", true]
+      ansible.builtin.set_fact:
+        _definition: "{{ _answer.updated_execution_environment_yml | default('') }}"
+        _summary: "{{ _answer.summary | default('') }}"
+        _root_cause: "{{ _answer.root_cause | default('') }}"
+        _category: "{{ _answer.failure_category | default('unknown') }}"
+        _retry: "{{ _answer.retry_recommended | default('no') in _yes }}"
+        _needs_human: "{{ _answer.requires_human_review | default('no') in _yes }}"
 
-    - name: Publish the result for automation orchestrator
+    - name: Work out whether to stage the fix
+      ansible.builtin.set_fact:
+        _apply: >-
+          {{ _retry | bool
+             and (not _needs_human | bool or ee_ignore_human_review | bool)
+             and _definition | trim | length > 0 }}
+        _reason: >-
+          {{ 'ok' if _retry | bool and (not _needs_human | bool or ee_ignore_human_review | bool)
+                  and _definition | trim | length > 0
+             else ('agent_declined_retry' if not _retry | bool
+                   else ('needs_human_review' if _needs_human | bool else 'no_definition_returned')) }}
+
+    - name: Stage the corrected definition
+      when: _apply | bool
+      block:
+        - name: Work out where the next build looks for a fix
+          ansible.builtin.set_fact:
+            _fix_dir: "{{ ee_workdir_base }}/.fixes"
+            _ref_short: "{{ ee_git_ref | regex_replace('[^A-Za-z0-9]', '-') | truncate(12, true, '') }}"
+
+        - name: Create the fix directory
+          ansible.builtin.file:
+            path: "{{ _fix_dir }}"
+            state: directory
+            mode: "0755"
+
+        - name: Check the corrected definition is a valid definition
+          ansible.builtin.assert:
+            that:
+              - (_definition | from_yaml) is mapping
+              - (_definition | from_yaml).version is defined
+            fail_msg: The corrected definition is not a valid execution environment file.
+
+        - name: Write it where the next build will find it
+          ansible.builtin.copy:
+            content: "{{ _definition }}"
+            dest: "{{ _fix_dir }}/{{ ee_name }}-{{ _ref_short }}.yml"
+            mode: "0644"
+
+    - name: Publish the verdict for automation orchestrator
       ansible.builtin.set_stats:
         aggregate: false
         per_host: false
         data:
-          ee_fix_applied: true
-          ee_fix_path: "{{ _fix_dir }}/{{ ee_name }}-{{ _ref_short }}.yml"
+          ee_fix_applied: "{{ 'true' if _apply | bool else 'false' }}"
+          ee_fix_reason: "{{ _reason }}"
+          ee_ai_summary: "{{ _summary }}"
+          ee_ai_root_cause: "{{ _root_cause }}"
+          ee_ai_category: "{{ _category }}"
+          ee_fix_path: >-
+            {{ (_fix_dir ~ '/' ~ ee_name ~ '-' ~ _ref_short ~ '.yml') if _apply | bool else '' }}
 
-    - name: Say what was staged
+    - name: Say what happened
       ansible.builtin.debug:
         msg: >-
-          Staged a corrected definition for {{ ee_name }} at
-          {{ _fix_dir }}/{{ ee_name }}-{{ _ref_short }}.yml.
-          The next build will use it instead of the file in the repository.
+          {{ ('Staged a corrected definition for ' ~ ee_name ~ '; the next build will use it.')
+             if _apply | bool
+             else ('No retry: ' ~ _reason ~ '. ' ~ _summary) }}
