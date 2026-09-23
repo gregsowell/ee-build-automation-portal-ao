@@ -103,7 +103,11 @@ Then:
 ## Things that bite
 
 - **The event stream starts in test mode.** Events are recorded but never reach
-  the activation until you turn it off.
+  the activation until you turn it off. Watch for this after a rerun of
+  `configure_aap.yml`: it now leaves the current setting alone, but an earlier
+  version turned test mode back on, and a chain that stops this way looks
+  healthy from every angle — GitHub reports a 200, the stream counts the event,
+  and the activation simply never sees it.
 - **A running activation cannot be patched.** Rerunning `configure_aap.yml`
   leaves it alone; delete it (or pass `eda_replace_activation=true`) to pick up
   a changed rulebook.
