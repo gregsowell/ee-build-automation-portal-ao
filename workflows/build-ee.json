@@ -240,9 +240,9 @@
     {
       "id": "check_ai_modified_definition",
       "type": "condition",
-      "name": "Did AI Modify EE Files",
+      "name": "Did The Agent Change It",
       "parameters": {
-        "condition": "${loop_until_built.iteration_count} > 1"
+        "condition": "${build_ee.artifacts.ee_definition_source} == 'ai_override'"
       },
       "position": {
         "x": 1245.8393300743553,
@@ -383,11 +383,6 @@
       "from_port": "false"
     },
     {
-      "from": "check_build_succeeded",
-      "to": "check_ai_modified_definition",
-      "from_port": "true"
-    },
-    {
       "from": "check_ai_modified_definition",
       "to": "register_new_ee",
       "from_port": "false"
@@ -434,6 +429,11 @@
     {
       "from": "check_fix_staged",
       "to": "notify_failure",
+      "from_port": "false"
+    },
+    {
+      "from": "check_gave_up",
+      "to": "check_ai_modified_definition",
       "from_port": "false"
     }
   ]
