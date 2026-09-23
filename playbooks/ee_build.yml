@@ -37,8 +37,8 @@
     ee_build_log_lines: 150
     # The orchestrator caps an agent prompt at 10000 characters, and the prompt
     # carries both of these, so they are trimmed to leave room for the rest.
-    ee_build_log_max_chars: 3000
-    ee_definition_max_chars: 4000
+    ee_build_log_max_chars: 2500
+    ee_definition_max_chars: 3000
     ee_container_runtime: podman
     ee_build_verbosity: 3
     # Registry logins. Injected by the "EE Build Registries" credential type;
