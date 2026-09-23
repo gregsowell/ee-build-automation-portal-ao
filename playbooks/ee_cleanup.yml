@@ -1,0 +1,206 @@
+---
+# Remove an execution environment from everywhere the build chain put it:
+# automation controller, private automation hub, and the build host.
+#
+# Job template: "EE Build | Remove EE"  (survey enabled)
+# Inventory:    the inventory holding the build host, limited to that host
+# Credentials:  a machine credential for the build host
+#               + "EE Build Registries" (hub login)
+#               + a Red Hat Ansible Automation Platform credential (controller API)
+#
+# Survey variables
+#   ee_name              The execution environment to remove
+#   ee_cleanup_check     Report what would go without removing anything
+#   ee_remove_controller / ee_remove_hub / ee_remove_local
+#
+# Nothing here fails when a piece is already gone: each target reports
+# "removed" or "not found", so a rerun is quiet and a half-finished cleanup
+# can be completed by running it again.
+- name: Remove an execution environment from controller, hub and the build host
+  hosts: "{{ ee_build_host | default('ee-builder') }}"
+  gather_facts: false
+
+  vars:
+    ee_cleanup_check: false
+    ee_remove_controller: true
+    ee_remove_hub: true
+    ee_remove_local: true
+    ee_workdir_base: /var/tmp/ee-builds
+    ee_hub_host: ""
+    ee_hub_username: ""
+    ee_hub_password: ""
+    ee_aap_url: "{{ lookup('ansible.builtin.env', 'CONTROLLER_HOST') }}"
+    ee_aap_token: "{{ lookup('ansible.builtin.env', 'CONTROLLER_OAUTH_TOKEN') }}"
+    ee_aap_validate_certs: false
+    _report: []
+
+  tasks:
+    - name: Check the execution environment was named
+      ansible.builtin.assert:
+        that:
+          - ee_name | default('', true) | length > 0
+          - ee_name is match('^[A-Za-z0-9][A-Za-z0-9._-]*$')
+        fail_msg: >-
+          ee_name is required and may only hold letters, digits, dots, dashes
+          and underscores.
+
+    - name: Say what this run will do
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'Checking what would be removed for' if ee_cleanup_check | bool else 'Removing' }}
+          '{{ ee_name }}' (controller: {{ ee_remove_controller }},
+          hub: {{ ee_remove_hub }}, build host: {{ ee_remove_local }})
+
+    # ------------------------------------------------------------ controller
+    - name: Remove it from automation controller
+      when: ee_remove_controller | bool
+      delegate_to: localhost
+      vars:
+        _api: >-
+          {{ (ee_aap_url if ee_aap_url is match('https?://') else 'https://' ~ ee_aap_url)
+             | regex_replace('/$', '') }}/api/controller/v2
+        _headers:
+          Authorization: "Bearer {{ ee_aap_token }}"
+      block:
+        - name: Look for the execution environment
+          ansible.builtin.uri:
+            url: "{{ _api }}/execution_environments/?name={{ ee_name | urlencode }}"
+            headers: "{{ _headers }}"
+            validate_certs: "{{ ee_aap_validate_certs }}"
+          register: _ee_lookup
+
+        - name: Delete the execution environment
+          ansible.builtin.uri:
+            url: "{{ _api }}/execution_environments/{{ (_ee_lookup.json.results | first).id }}/"
+            method: DELETE
+            headers: "{{ _headers }}"
+            status_code: [202, 204]
+            validate_certs: "{{ ee_aap_validate_certs }}"
+          when:
+            - _ee_lookup.json.count | int > 0
+            - not ee_cleanup_check | bool
+
+        - name: Note what happened in controller
+          ansible.builtin.set_fact:
+            _report: >-
+              {{ _report + ['controller: ' ~ (
+                   (('would remove ' if ee_cleanup_check | bool else 'removed ')
+                    ~ (_ee_lookup.json.results | first).image)
+                   if _ee_lookup.json.count | int > 0 else 'not found')] }}
+
+    # ------------------------------------------------------------------- hub
+    - name: Remove it from private automation hub
+      when:
+        - ee_remove_hub | bool
+        - ee_hub_host | length > 0
+      delegate_to: localhost
+      vars:
+        _hub: "https://{{ ee_hub_host }}/api/galaxy/v3/plugin/execution-environments/repositories"
+      block:
+        - name: Look for the container repository
+          ansible.builtin.uri:
+            url: "{{ _hub }}/{{ ee_name }}/"
+            url_username: "{{ ee_hub_username }}"
+            url_password: "{{ ee_hub_password }}"
+            force_basic_auth: true
+            status_code: [200, 404]
+            validate_certs: false
+          register: _hub_lookup
+          no_log: true
+
+        - name: Delete the container repository
+          ansible.builtin.uri:
+            url: "{{ _hub }}/{{ ee_name }}/"
+            method: DELETE
+            url_username: "{{ ee_hub_username }}"
+            url_password: "{{ ee_hub_password }}"
+            force_basic_auth: true
+            status_code: [200, 202, 204]
+            validate_certs: false
+          when:
+            - _hub_lookup.status == 200
+            - not ee_cleanup_check | bool
+          no_log: true
+
+        - name: Note what happened in hub
+          ansible.builtin.set_fact:
+            _report: >-
+              {{ _report + ['hub: ' ~ (
+                   ('would remove container repository' if ee_cleanup_check | bool
+                    else 'removed container repository')
+                   if _hub_lookup.status == 200 else 'not found')] }}
+
+    # ------------------------------------------------------------ build host
+    - name: Remove it from the build host
+      when: ee_remove_local | bool
+      block:
+        # awk rather than podman's own format string, whose braces collide
+        # with Jinja.
+        - name: List local images for this execution environment
+          ansible.builtin.shell:
+            cmd: >-
+              podman images |
+              awk -v ee="{{ ee_name }}" 'NR > 1 && ($1 == ee || $1 ~ "/" ee "$") {print $1 ":" $2}'
+            executable: /bin/bash
+          register: _images
+          changed_when: false
+          failed_when: false
+
+        - name: Remove those images
+          ansible.builtin.command:
+            argv: ["podman", "rmi", "-f", "{{ item }}"]
+          loop: "{{ _images.stdout_lines | default([]) }}"
+          when: not ee_cleanup_check | bool
+          register: _rmi
+          changed_when: true
+          failed_when: false
+
+        - name: Find build directories
+          ansible.builtin.find:
+            paths: "{{ ee_workdir_base }}"
+            patterns: "{{ ee_name }}-*"
+            file_type: any
+          register: _dirs
+          failed_when: false
+
+        - name: Find staged fixes
+          ansible.builtin.find:
+            paths: "{{ ee_workdir_base }}/.fixes"
+            patterns: "{{ ee_name }}-*.yml"
+          register: _fixes
+          failed_when: false
+
+        - name: Remove them
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop: >-
+            {{ (_dirs.files | default([]) | map(attribute='path') | list)
+               + (_fixes.files | default([]) | map(attribute='path') | list) }}
+          when: not ee_cleanup_check | bool
+
+        - name: Note what happened on the build host
+          ansible.builtin.set_fact:
+            _report: >-
+              {{ _report + [
+                   'build host images: ' ~ (_images.stdout_lines | default([]) | join(', ')
+                                            if _images.stdout_lines | default([]) | length > 0
+                                            else 'none'),
+                   'build host files: ' ~ (((_dirs.files | default([]) | length)
+                                            + (_fixes.files | default([]) | length)) | string)
+                                        ~ ' path(s)'] }}
+
+    - name: Show what was done
+      ansible.builtin.debug:
+        msg: >-
+          {{ [(('Would remove' if ee_cleanup_check | bool else 'Removed') ~ " '" ~ ee_name ~ "':")]
+             + _report }}
+
+    - name: Publish the result
+      ansible.builtin.set_stats:
+        aggregate: false
+        per_host: false
+        data:
+          ee_cleanup_name: "{{ ee_name }}"
+          ee_cleanup_checked_only: "{{ ee_cleanup_check }}"
+          ee_cleanup_report: "{{ _report }}"

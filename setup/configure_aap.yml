@@ -31,6 +31,7 @@
     ee_notify_job_template: EE Build | Notify
     ee_forward_job_template: EE Build | Forward Event to AO
     ee_prep_job_template: EE Build | Prep Builder Host
+    ee_cleanup_job_template: EE Build | Remove EE
     ee_localhost_inventory: Demo Inventory
     ee_aap_credential_name: aap
     # --- EDA ----------------------------------------------------------------
@@ -337,6 +338,15 @@
           ask_variables_on_launch: true
           # Controller wants extra variables as a YAML or JSON string.
           extra_vars: "ao_webhook_path: {{ ao_webhook_path | default('ee-definition-pushed') }}"
+        - name: "{{ ee_cleanup_job_template }}"
+          description: Removes an execution environment from controller, hub and the build host.
+          job_type: run
+          organization: "{{ _org_id | int }}"
+          inventory: "{{ _build_inventory_id | int }}"
+          project: "{{ _project_id | int }}"
+          playbook: playbooks/ee_cleanup.yml
+          limit: "{{ ee_build_host_limit }}"
+          survey_enabled: true
         - name: "{{ ee_prep_job_template }}"
           description: Installs podman and ansible-builder on the execution environment build host.
           job_type: run
@@ -348,6 +358,17 @@
           ask_variables_on_launch: true
       loop_control:
         label: "{{ item.name }}"
+
+    - name: Find the cleanup job template
+      ansible.builtin.uri:
+        url: "{{ _controller_api }}/job_templates/?name={{ ee_cleanup_job_template | urlencode }}"
+        headers: "{{ _api_headers }}"
+        validate_certs: "{{ aap_validate_certs }}"
+      register: _cleanup_jt
+
+    - name: Keep its ID
+      ansible.builtin.set_fact:
+        _cleanup_jt_id: "{{ (_cleanup_jt.json.results | first).id }}"
 
     - name: Set the credentials on each job template
       ansible.builtin.include_tasks: tasks/set_job_template_credentials.yml
@@ -364,11 +385,68 @@
           credentials: []
         - name: "{{ ee_forward_job_template }}"
           credentials: "{{ [_ao_credential_id] }}"
+        - name: "{{ ee_cleanup_job_template }}"
+          credentials: >-
+            {{ [_machine_credential_id, _registry_credential_id]
+               + ([_aap_credential_id] if _aap_credential_id | length > 0 else []) }}
         - name: "{{ ee_prep_job_template }}"
           credentials: "{{ [_machine_credential_id] }}"
       loop_control:
         loop_var: jt_credentials
         label: "{{ jt_credentials.name }}"
+
+    - name: Put the survey on the cleanup job template
+      ansible.builtin.uri:
+        url: "{{ _controller_api }}/job_templates/{{ _cleanup_jt_id }}/survey_spec/"
+        method: POST
+        headers: "{{ _api_headers }}"
+        body_format: json
+        body:
+          name: Remove an execution environment
+          description: Clears it out of controller, private automation hub and the build host.
+          spec:
+            - question_name: Execution environment name
+              question_description: Exactly as it appears in controller, for example netops-ee.
+              variable: ee_name
+              type: text
+              required: true
+              min: 1
+              max: 128
+            - question_name: Check first, remove nothing
+              question_description: Lists what would go, so you can confirm before deleting.
+              variable: ee_cleanup_check
+              type: multiplechoice
+              choices:
+                - "false"
+                - "true"
+              default: "false"
+              required: true
+            - question_name: Remove from automation controller
+              variable: ee_remove_controller
+              type: multiplechoice
+              choices:
+                - "true"
+                - "false"
+              default: "true"
+              required: true
+            - question_name: Remove from private automation hub
+              variable: ee_remove_hub
+              type: multiplechoice
+              choices:
+                - "true"
+                - "false"
+              default: "true"
+              required: true
+            - question_name: Remove images and build files from the build host
+              variable: ee_remove_local
+              type: multiplechoice
+              choices:
+                - "true"
+                - "false"
+              default: "true"
+              required: true
+        status_code: [200, 201]
+        validate_certs: "{{ aap_validate_certs }}"
 
     # ------------------------------------------------------------------- EDA
     - name: Create the EDA project

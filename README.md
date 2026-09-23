@@ -48,6 +48,7 @@ cross-step references.
 | `playbooks/ee_apply_fix.yml` | Reads the agent's answer, decides whether a retry is warranted, and stages the corrected definition on the build host for the next attempt. |
 | `playbooks/ee_notify.yml` | Reports a build that failed, was rejected, or that the agent would not retry. |
 | `playbooks/ao_forward_event.yml` | Turns a GitHub push into one orchestrator trigger call per changed definition. |
+| `playbooks/ee_cleanup.yml` | Removes an execution environment from controller, hub and the build host. Job template **EE Build \| Remove EE**, with a survey. |
 | `playbooks/ee_builder_prep.yml` | Installs podman and `ansible-builder` on the build host. Run once. |
 | `rulebooks/ee_definition_push.yml` | The rulebook behind the activation. |
 | `rulebooks/ee_definition_push_direct.yml` | An experiment: calling the orchestrator from the rulebook with no job template in between. See [below](#can-eda-call-the-orchestrator-directly). |
@@ -140,6 +141,24 @@ Then:
   chain self-corrects, but it costs a build attempt.
 - **Base images need an explicit tag.** `registry.redhat.io` rejects `latest`
   for the ee-minimal repositories.
+
+## Removing one again
+
+Demos leave execution environments behind in three places. Run the **EE Build |
+Remove EE** job template and answer its survey:
+
+| Question | Default |
+|---|---|
+| Execution environment name | — |
+| Check first, remove nothing | `false` |
+| Remove from automation controller | `true` |
+| Remove from private automation hub | `true` |
+| Remove images and build files from the build host | `true` |
+
+Answering `true` to *check first* lists what would go without touching
+anything. A target that is already gone reports "not found" rather than
+failing, so reruns are quiet and a half-finished cleanup can be completed by
+running it again.
 
 ## How the loop decides what to do
 
