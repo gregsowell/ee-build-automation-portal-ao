@@ -53,6 +53,7 @@ cross-step references.
 | `rulebooks/ee_definition_push_direct.yml` | An experiment: calling the orchestrator from the rulebook with no job template in between. See [below](#can-eda-call-the-orchestrator-directly). |
 | `workflows/build-ee.json` | The Build-EE workflow, with the loop, the AI repair step and the approval gate. |
 | `setup/configure_aap.yml` | Creates the credentials, project, job templates and EDA wiring in AAP. |
+| `setup/sync_hub_collections.yml` | Syncs a pinned set of collections into the hub's community repository, so hub-only builds have content to pull. |
 | `setup/configure_ao.yml` | Creates the orchestrator service account and imports and publishes the workflow. |
 | `portal/README.md` | Configuring the portal to publish definitions to GitHub. |
 | `examples/` | One definition that builds and one that fails on purpose. |
@@ -90,7 +91,9 @@ Then:
 5. Send a test push and confirm the event arrives, then take the event stream
    out of test mode so events reach the activation.
 6. Configure the portal, as described in [portal/README.md](portal/README.md).
-7. Give the workflow's AI step an LLM provider in the orchestrator:
+7. Stock the hub if it is thin: `ansible-playbook setup/sync_hub_collections.yml
+   -e @secrets.yml`. Builds only see what the hub holds.
+8. Give the workflow's AI step an LLM provider in the orchestrator:
    **Configuration > Integrations > Add**, type *LLM provider* (Red Hat AI,
    OpenAI, Anthropic, Gemini or custom), then enable a model and mark it
    default. Without one, a failed build stops at the repair step.

@@ -1,0 +1,154 @@
+---
+# Sync a set of collections into private automation hub, so builds that are
+# restricted to the hub have something to pull.
+#
+#   ansible-playbook setup/sync_hub_collections.yml -e @secrets.yml
+#
+# It rewrites the requirements file on the hub's community remote, then syncs
+# that repository. Anything already in the repository stays; the requirements
+# file only says what to fetch.
+#
+# Dependencies come along too, so the collection count after a sync is higher
+# than the list below. Pin versions: without one, every version of a collection
+# is fetched, which is a lot of disk.
+- name: Sync collections into private automation hub
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    aap_validate_certs: false
+    hub_repository: community
+    hub_sync_timeout: 3600
+    # The set from the old execution environment definitions, pinned.
+    hub_sync_collections:
+      - name: azure.azcollection
+        version: "4.0.0"
+      - name: awx.awx
+        version: "24.6.1"
+      - name: community.vmware
+        version: "6.4.0"
+      - name: community.routeros
+        version: "3.22.0"
+      - name: community.hashi_vault
+        version: "7.1.0"
+      - name: amazon.aws
+        version: "11.4.0"
+      - name: community.aws
+        version: "11.1.0"
+      - name: community.general
+        version: "13.4.0"
+      - name: servicenow.servicenow
+        version: "1.0.6"
+      - name: ansible.netcommon
+        version: "8.7.1"
+      - name: ansible.utils
+        version: "6.1.1"
+      - name: cisco.ios
+        version: "11.6.0"
+      - name: cisco.nxos
+        version: "13.0.0"
+      - name: arista.eos
+        version: "12.3.0"
+      - name: junipernetworks.junos
+        version: "11.1.1"
+      - name: cisco.meraki
+        version: "2.25.1"
+      - name: cisco.aci
+        version: "2.13.0"
+      - name: cisco.asa
+        version: "7.0.0"
+      - name: community.windows
+        version: "3.3.0"
+
+  tasks:
+    - name: Check the required variables
+      ansible.builtin.assert:
+        that:
+          - aap_url is defined and aap_url | length > 0
+          - aap_token is defined and aap_token | length > 0
+        fail_msg: Pass secrets.yml with -e @secrets.yml.
+
+    - name: Set the API root and headers
+      ansible.builtin.set_fact:
+        _pulp_api: "{{ aap_url | regex_replace('/$', '') }}/api/galaxy/pulp/api/v3"
+        _api_headers:
+          Authorization: "Bearer {{ aap_token }}"
+      no_log: true
+
+    - name: Find the remote and the repository
+      ansible.builtin.uri:
+        url: "{{ _pulp_api }}/{{ item }}/?name={{ hub_repository | urlencode }}"
+        headers: "{{ _api_headers }}"
+        validate_certs: "{{ aap_validate_certs }}"
+      loop:
+        - remotes/ansible/collection
+        - repositories/ansible/ansible
+      register: _hub_lookup
+
+    - name: Keep their hrefs
+      ansible.builtin.set_fact:
+        _remote_href: "{{ (_hub_lookup.results[0].json.results | first).pulp_href }}"
+        _repo_href: "{{ (_hub_lookup.results[1].json.results | first).pulp_href }}"
+
+    - name: Put the collection list on the remote
+      ansible.builtin.uri:
+        url: "{{ aap_url | regex_replace('/$', '') }}{{ _remote_href }}"
+        method: PATCH
+        headers: "{{ _api_headers }}"
+        body_format: json
+        body:
+          requirements_file: |
+            collections:
+            {% for collection in hub_sync_collections %}
+              - name: {{ collection.name }}
+            {% if collection.version is defined %}
+                version: "{{ collection.version }}"
+            {% endif %}
+            {% endfor %}
+        status_code: [200, 202]
+        validate_certs: "{{ aap_validate_certs }}"
+
+    - name: Start the sync
+      ansible.builtin.uri:
+        url: "{{ aap_url | regex_replace('/$', '') }}{{ _repo_href }}sync/"
+        method: POST
+        headers: "{{ _api_headers }}"
+        body_format: json
+        body:
+          remote: "{{ _remote_href }}"
+          optimize: false
+        status_code: [200, 202]
+        validate_certs: "{{ aap_validate_certs }}"
+      register: _sync
+
+    - name: Wait for the sync to finish
+      ansible.builtin.uri:
+        url: "{{ aap_url | regex_replace('/$', '') }}{{ _sync.json.task }}"
+        headers: "{{ _api_headers }}"
+        validate_certs: "{{ aap_validate_certs }}"
+      register: _task
+      until: _task.json.state in ['completed', 'failed', 'canceled']
+      retries: "{{ (hub_sync_timeout | int / 20) | int }}"
+      delay: 20
+
+    - name: Stop when the sync failed
+      ansible.builtin.fail:
+        msg: >-
+          The sync ended as {{ _task.json.state }}:
+          {{ _task.json.error.description | default('no detail') }}
+      when: _task.json.state != 'completed'
+
+    - name: Count what the repository holds now
+      ansible.builtin.uri:
+        url: >-
+          {{ aap_url | regex_replace('/$', '') }}/api/galaxy/v3/plugin/ansible/content/{{ hub_repository }}/collections/index/?limit=100
+        headers: "{{ _api_headers }}"
+        validate_certs: "{{ aap_validate_certs }}"
+      register: _index
+
+    - name: Show them
+      ansible.builtin.debug:
+        msg:
+          - "{{ hub_repository }} now holds {{ _index.json.meta.count }} collections"
+          - "{{ _index.json.data | map(attribute='namespace') | zip(_index.json.data | map(attribute='name')) | map('join', '.') | sort | join(', ') }}"
