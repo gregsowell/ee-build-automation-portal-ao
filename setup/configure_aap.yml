@@ -467,9 +467,15 @@
           event_stream_type: hmac
           eda_credential_id: "{{ _eda_github_credential_id | int }}"
           organization_id: "{{ _org_id | int }}"
-          # Events only reach the activation once this is true. Leave it off
-          # until the event stream's test mode shows a GitHub push arriving.
-          test_mode: "{{ eda_event_stream_test_mode | default(true) }}"
+          # Test mode records events without forwarding them to the activation.
+          # A new stream starts in test mode so the first delivery can be
+          # inspected; on a rerun the current setting is left alone, since
+          # turning it back on silently stops the chain.
+          test_mode: >-
+            {{ eda_event_stream_test_mode
+               | default(_upsert_lookup.json.results
+                         | selectattr('name', 'equalto', eda_event_stream_name)
+                         | map(attribute='test_mode') | first | default(true)) }}
       ansible.builtin.include_tasks: tasks/upsert.yml
 
     - name: Keep the event stream ID
