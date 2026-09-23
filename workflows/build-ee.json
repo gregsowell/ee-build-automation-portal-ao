@@ -229,8 +229,7 @@
               "description": "The complete corrected execution environment definition."
             }
           }
-        },
-        "tool_selection_strategy": "NONE"
+        }
       },
       "settings": {},
       "position": {
@@ -243,7 +242,7 @@
       "type": "condition",
       "name": "AI Recommends Retry",
       "parameters": {
-        "condition": "${ai_repair.retry_recommended} == 'yes' and ${ai_repair.requires_human_review} == 'no'"
+        "condition": "${ai_repair.result.content.retry_recommended} == 'yes' and ${ai_repair.result.content.requires_human_review} == 'no'"
       },
       "position": {
         "x": 1800,
@@ -267,7 +266,7 @@
       "type": "approval",
       "name": "Human Approval",
       "parameters": {
-        "prompt": "An AI agent modified the execution environment definition for ${build_ee.artifacts.ee_name} and the build then succeeded.\n\nWhat it changed: ${ai_repair.summary}\nRoot cause: ${ai_repair.root_cause}\n\nThe definition that was built:\n${build_ee.artifacts.ee_definition}\n\nApprove to push this image to private automation hub and register it in Ansible Automation Platform.",
+        "prompt": "An AI agent modified the execution environment definition for ${build_ee.artifacts.ee_name} and the build then succeeded.\n\nWhat it changed: ${ai_repair.result.content.summary}\nRoot cause: ${ai_repair.result.content.root_cause}\n\nThe definition that was built:\n${build_ee.artifacts.ee_definition}\n\nApprove to push this image to private automation hub and register it in Ansible Automation Platform.",
         "fallback_decision": "reject",
         "decision_window": 14400,
         "approver_users": [
@@ -320,8 +319,8 @@
           "ee_git_ref": "${build_ee.artifacts.ee_git_ref}",
           "ee_build_attempt": "${loop_until_built.iteration_count}",
           "ee_build_log_tail": "${build_ee.artifacts.ee_build_log_tail}",
-          "ee_ai_summary": "${ai_repair.summary}",
-          "ee_ai_root_cause": "${ai_repair.root_cause}",
+          "ee_ai_summary": "${ai_repair.result.content.summary}",
+          "ee_ai_root_cause": "${ai_repair.result.content.root_cause}",
           "ee_job_url": "${build_ee.job_url}"
         }
       },
@@ -343,7 +342,7 @@
         "extra_vars": {
           "ee_name": "${build_ee.artifacts.ee_name}",
           "ee_git_ref": "${build_ee.artifacts.ee_git_ref}",
-          "ee_definition_override": "${ai_repair.updated_execution_environment_yml}"
+          "ee_definition_override": "${ai_repair.result.content.updated_execution_environment_yml}"
         }
       },
       "position": {
