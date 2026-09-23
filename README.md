@@ -106,6 +106,14 @@ Then:
   is read as a step name, which is why the agent answers `yes` and `no`.
 - **A do_while condition runs after the body**, so it can reference the build
   step, and the loop's `complete` port fires on success as well as on giving up.
+- **Collections come from private automation hub only.** `ee_galaxy_url` puts
+  the hub's `rh-certified`, `validated`, `published` and `community`
+  repositories in the build's galaxy configuration. Setting
+  `ee_galaxy_public_fallback: true` adds galaxy.ansible.com, but then the
+  newest version anywhere wins: ansible-galaxy resolves across every configured
+  server rather than in list order, so an unapproved public release can beat
+  the one in your hub. A collection missing from the hub fails the build, and
+  the agent's diagnosis says so.
 - **Base images need an explicit tag.** `registry.redhat.io` rejects `latest`
   for the ee-minimal repositories.
 

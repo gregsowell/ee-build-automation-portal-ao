@@ -55,14 +55,16 @@
     ee_galaxy_username: "{{ ee_hub_username | default('') }}"
     ee_galaxy_password: "{{ ee_hub_password | default('') }}"
     ee_galaxy_validate_certs: false
-    # Hub repositories to search, in order. galaxy.ansible.com is appended
-    # last unless ee_galaxy_public_fallback is false.
+    # Hub repositories to search. galaxy.ansible.com is only added when
+    # ee_galaxy_public_fallback is true, and adding it means the newest version
+    # anywhere wins rather than the approved one: ansible-galaxy resolves
+    # across every configured server, not in list order.
     ee_galaxy_repositories:
       - rh-certified
       - validated
       - published
       - community
-    ee_galaxy_public_fallback: true
+    ee_galaxy_public_fallback: false
 
   tasks:
     - name: Check the required variables
