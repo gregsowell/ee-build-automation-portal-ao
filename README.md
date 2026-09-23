@@ -45,7 +45,7 @@ cross-step references.
 |---|---|
 | `playbooks/ee_build.yml` | Builds the image with `ansible-builder`. Reports the outcome through `set_stats` instead of failing, so the orchestrator can read the log and retry. |
 | `playbooks/ee_register.yml` | Pushes the image to private automation hub and creates or updates the execution environment in AAP. |
-| `playbooks/ee_apply_fix.yml` | Writes the AI-corrected definition to a scratch file on the build host, which the next build picks up. |
+| `playbooks/ee_apply_fix.yml` | Reads the agent's answer, decides whether a retry is warranted, and stages the corrected definition on the build host for the next attempt. |
 | `playbooks/ee_notify.yml` | Reports a build that failed, was rejected, or that the agent would not retry. |
 | `playbooks/ao_forward_event.yml` | Turns a GitHub push into one orchestrator trigger call per changed definition. |
 | `playbooks/ee_builder_prep.yml` | Installs podman and `ansible-builder` on the build host. Run once. |
@@ -111,6 +111,13 @@ Then:
   is read as a step name, which is why the agent answers `yes` and `no`.
 - **A do_while condition runs after the body**, so it can reference the build
   step, and the loop's `complete` port fires on success as well as on giving up.
+- **Everything after the loop hangs off its exit**, not off the condition inside
+  it. Nodes outside the loop body run once, so a build that only succeeded on a
+  retry never reached them.
+- **Taking one branch of a condition marks the other as skipped, permanently.**
+  A node that two branches both point at gets skipped by the first one and stays
+  skipped, so each branch here ends at its own node: two register steps and
+  three notify steps rather than one of each.
 - **Collections come from private automation hub only.** `ee_galaxy_url` puts
   the hub's `rh-certified`, `validated`, `published` and `community`
   repositories in the build's galaxy configuration. Setting

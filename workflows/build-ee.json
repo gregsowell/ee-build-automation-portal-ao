@@ -301,7 +301,7 @@
         "organization_name": "Default",
         "extra_vars": {
           "ee_name": "${build_ee.artifacts.ee_name}",
-          "ee_notify_reason": "${apply_ai_fix.artifacts.ee_fix_reason}",
+          "ee_notify_reason": "build_failed",
           "ee_definition_path": "${build_ee.artifacts.ee_definition_path}",
           "ee_repo_url": "${build_ee.artifacts.ee_repo_url}",
           "ee_git_ref": "${build_ee.artifacts.ee_git_ref}",
@@ -361,6 +361,84 @@
         "x": 2150,
         "y": 480
       }
+    },
+    {
+      "id": "register_after_approval",
+      "type": "aap_job_template",
+      "name": "Register New EE (After Approval)",
+      "parameters": {
+        "diff_mode": false,
+        "credential_id": "CREDENTIAL_ID_PLACEHOLDER",
+        "integration_id": "INTEGRATION_ID_PLACEHOLDER",
+        "job_template_name": "EE Build | Register EE",
+        "organization_name": "Default",
+        "extra_vars": {
+          "ee_name": "${build_ee.artifacts.ee_name}",
+          "ee_tag": "${build_ee.artifacts.ee_tag}",
+          "ee_local_image": "${build_ee.artifacts.ee_local_image}",
+          "ee_repo_url": "${build_ee.artifacts.ee_repo_url}"
+        }
+      },
+      "position": {
+        "x": 2450,
+        "y": 60
+      }
+    },
+    {
+      "id": "notify_no_retry",
+      "type": "aap_job_template",
+      "name": "EE Build Stopped - Agent Would Not Retry",
+      "parameters": {
+        "diff_mode": false,
+        "credential_id": "CREDENTIAL_ID_PLACEHOLDER",
+        "integration_id": "INTEGRATION_ID_PLACEHOLDER",
+        "job_template_name": "EE Build | Notify",
+        "organization_name": "Default",
+        "extra_vars": {
+          "ee_name": "${build_ee.artifacts.ee_name}",
+          "ee_notify_reason": "${apply_ai_fix.artifacts.ee_fix_reason}",
+          "ee_definition_path": "${build_ee.artifacts.ee_definition_path}",
+          "ee_repo_url": "${build_ee.artifacts.ee_repo_url}",
+          "ee_git_ref": "${build_ee.artifacts.ee_git_ref}",
+          "ee_build_attempt": "${loop_until_built.iteration_count}",
+          "ee_build_log_tail": "${build_ee.artifacts.ee_build_log_tail}",
+          "ee_ai_summary": "${apply_ai_fix.artifacts.ee_ai_summary}",
+          "ee_ai_root_cause": "${apply_ai_fix.artifacts.ee_ai_root_cause}",
+          "ee_job_url": "${build_ee.job_url}"
+        }
+      },
+      "position": {
+        "x": 2150,
+        "y": 760
+      }
+    },
+    {
+      "id": "notify_rejected",
+      "type": "aap_job_template",
+      "name": "EE Build Rejected - Send Notification",
+      "parameters": {
+        "diff_mode": false,
+        "credential_id": "CREDENTIAL_ID_PLACEHOLDER",
+        "integration_id": "INTEGRATION_ID_PLACEHOLDER",
+        "job_template_name": "EE Build | Notify",
+        "organization_name": "Default",
+        "extra_vars": {
+          "ee_name": "${build_ee.artifacts.ee_name}",
+          "ee_notify_reason": "rejected",
+          "ee_definition_path": "${build_ee.artifacts.ee_definition_path}",
+          "ee_repo_url": "${build_ee.artifacts.ee_repo_url}",
+          "ee_git_ref": "${build_ee.artifacts.ee_git_ref}",
+          "ee_build_attempt": "${loop_until_built.iteration_count}",
+          "ee_build_log_tail": "${build_ee.artifacts.ee_build_log_tail}",
+          "ee_ai_summary": "${apply_ai_fix.artifacts.ee_ai_summary}",
+          "ee_ai_root_cause": "${apply_ai_fix.artifacts.ee_ai_root_cause}",
+          "ee_job_url": "${build_ee.job_url}"
+        }
+      },
+      "position": {
+        "x": 2450,
+        "y": -140
+      }
     }
   ],
   "edges": [
@@ -388,21 +466,6 @@
       "from_port": "false"
     },
     {
-      "from": "check_ai_modified_definition",
-      "to": "human_approval",
-      "from_port": "true"
-    },
-    {
-      "from": "human_approval",
-      "to": "register_new_ee",
-      "from_port": "approved"
-    },
-    {
-      "from": "human_approval",
-      "to": "notify_failure",
-      "from_port": "rejected"
-    },
-    {
       "from": "loop_until_built",
       "to": "check_gave_up",
       "from_port": "complete"
@@ -427,13 +490,28 @@
       "to_port": "iterate"
     },
     {
-      "from": "check_fix_staged",
-      "to": "notify_failure",
+      "from": "check_gave_up",
+      "to": "check_ai_modified_definition",
       "from_port": "false"
     },
     {
-      "from": "check_gave_up",
-      "to": "check_ai_modified_definition",
+      "from": "check_ai_modified_definition",
+      "to": "human_approval",
+      "from_port": "true"
+    },
+    {
+      "from": "human_approval",
+      "to": "register_after_approval",
+      "from_port": "approved"
+    },
+    {
+      "from": "human_approval",
+      "to": "notify_rejected",
+      "from_port": "rejected"
+    },
+    {
+      "from": "check_fix_staged",
+      "to": "notify_no_retry",
       "from_port": "false"
     }
   ]
