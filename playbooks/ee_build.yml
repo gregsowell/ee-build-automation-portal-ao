@@ -35,6 +35,10 @@
     build_attempt: 0
     ee_workdir_base: /var/tmp/ee-builds
     ee_build_log_lines: 150
+    # The orchestrator caps an agent prompt at 10000 characters, and the prompt
+    # carries both of these, so they are trimmed to leave room for the rest.
+    ee_build_log_max_chars: 3000
+    ee_definition_max_chars: 4000
     ee_container_runtime: podman
     ee_build_verbosity: 3
     # Registry logins. Injected by the "EE Build Registries" credential type;
@@ -333,6 +337,15 @@
         state: absent
       when: _build_rc | int == 0
 
+    - name: Trim the artifacts so they fit an agent prompt
+      ansible.builtin.set_fact:
+        _log_for_agent: >-
+          {{ ('...earlier build output trimmed... ' ~ _build_log_text[-(ee_build_log_max_chars | int):])
+             if _build_log_text | length > ee_build_log_max_chars | int else _build_log_text }}
+        _definition_for_agent: >-
+          {{ (_definition_content[:(ee_definition_max_chars | int)] ~ ' # ...definition trimmed...')
+             if _definition_content | length > ee_definition_max_chars | int else _definition_content }}
+
     - name: Publish the result for automation orchestrator
       ansible.builtin.set_stats:
         aggregate: false
@@ -343,10 +356,10 @@
           ee_name: "{{ _ee_name }}"
           ee_tag: "{{ _ee_tag }}"
           ee_local_image: "localhost/{{ _ee_name }}:{{ _ee_tag }}"
-          ee_definition: "{{ _definition_content }}"
+          ee_definition: "{{ _definition_for_agent }}"
           ee_definition_path: "{{ ee_definition_path }}"
           ee_definition_source: "{{ 'ai_override' if _use_override | bool else 'repository' }}"
-          ee_build_log_tail: "{{ _build_log_text }}"
+          ee_build_log_tail: "{{ _log_for_agent }}"
           ee_build_attempt: "{{ build_attempt | int }}"
           ee_build_host: "{{ inventory_hostname }}"
           ee_repo_url: "{{ ee_repo_url }}"
