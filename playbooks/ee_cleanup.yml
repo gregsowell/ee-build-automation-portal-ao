@@ -31,6 +31,8 @@
     ee_hub_password: ""
     ee_aap_url: "{{ lookup('ansible.builtin.env', 'CONTROLLER_HOST') }}"
     ee_aap_token: "{{ lookup('ansible.builtin.env', 'CONTROLLER_OAUTH_TOKEN') }}"
+    ee_aap_username: "{{ lookup('ansible.builtin.env', 'CONTROLLER_USERNAME') }}"
+    ee_aap_password: "{{ lookup('ansible.builtin.env', 'CONTROLLER_PASSWORD') }}"
     ee_aap_validate_certs: false
     _report: []
 
@@ -59,13 +61,20 @@
         _api: >-
           {{ (ee_aap_url if ee_aap_url is match('https?://') else 'https://' ~ ee_aap_url)
              | regex_replace('/$', '') }}/api/controller/v2
-        _headers:
-          Authorization: "Bearer {{ ee_aap_token }}"
+        # The AAP credential carries either a token or a username and password.
+        _headers: >-
+          {{ {'Authorization': 'Bearer ' ~ ee_aap_token}
+             if ee_aap_token | default('', true) | length > 0 else {} }}
+        _user: "{{ omit if ee_aap_token | length > 0 else ee_aap_username }}"
+        _pass: "{{ omit if ee_aap_token | length > 0 else ee_aap_password }}"
       block:
         - name: Look for the execution environment
           ansible.builtin.uri:
             url: "{{ _api }}/execution_environments/?name={{ ee_name | urlencode }}"
             headers: "{{ _headers }}"
+            url_username: "{{ _user }}"
+            url_password: "{{ _pass }}"
+            force_basic_auth: "{{ ee_aap_token | length == 0 }}"
             validate_certs: "{{ ee_aap_validate_certs }}"
           register: _ee_lookup
 
@@ -74,6 +83,9 @@
             url: "{{ _api }}/execution_environments/{{ (_ee_lookup.json.results | first).id }}/"
             method: DELETE
             headers: "{{ _headers }}"
+            url_username: "{{ _user }}"
+            url_password: "{{ _pass }}"
+            force_basic_auth: "{{ ee_aap_token | length == 0 }}"
             status_code: [202, 204]
             validate_certs: "{{ ee_aap_validate_certs }}"
           when:
