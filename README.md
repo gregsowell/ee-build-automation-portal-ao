@@ -122,6 +122,16 @@ Then:
 - **Everything after the loop hangs off its exit**, not off the condition inside
   it. Nodes outside the loop body run once, so a build that only succeeded on a
   retry never reached them.
+- **The builder demands a connection from a condition's `Then` branch.** The
+  API accepts a condition wired on one side only, and publishes it, but opening
+  that workflow in the visual builder fails verification with *"missing a
+  connection from the 'Then' branch"* — which bites the first time you move a
+  node around to see the graph better. Where only one outcome needs a
+  destination, put it on `Then` and invert the test rather than leaving `Then`
+  empty. That is why the in-loop condition reads **Previous Completed Failed**,
+  `${build_ee.artifacts.ee_build_result} != 'success'`, with `Then` going to the
+  repair agent: the success path is handled after the loop, so it needs no
+  branch of its own. An empty `Else` is fine; an empty `Then` is not.
 - **Taking one branch of a condition marks the other as skipped, permanently.**
   A node that two branches both point at gets skipped by the first one and stays
   skipped, so each branch here ends at its own node: two register steps and

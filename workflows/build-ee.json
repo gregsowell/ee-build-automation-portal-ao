@@ -94,9 +94,9 @@
     {
       "id": "check_build_succeeded",
       "type": "condition",
-      "name": "Previous Completed Succesfully",
+      "name": "Previous Completed Failed",
       "parameters": {
-        "condition": "${build_ee.artifacts.ee_build_result} == 'success'"
+        "condition": "${build_ee.artifacts.ee_build_result} != 'success'"
       },
       "position": {
         "x": 960,
@@ -484,11 +484,6 @@
       "to": "check_build_succeeded"
     },
     {
-      "from": "check_build_succeeded",
-      "to": "ai_repair",
-      "from_port": "false"
-    },
-    {
       "from": "check_ai_modified_definition",
       "to": "register_new_ee",
       "from_port": "false"
@@ -545,6 +540,11 @@
     {
       "from": "register_after_approval",
       "to": "commit_ai_fix"
+    },
+    {
+      "from": "check_build_succeeded",
+      "to": "ai_repair",
+      "from_port": "true"
     }
   ]
 }
