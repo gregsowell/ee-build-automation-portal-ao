@@ -123,7 +123,43 @@ There is a second provider, `ansibleGitContents`, that crawls GitHub or GitLab
 organizations for `galaxy.yml` files. It is off here, since the hub is the
 approved source.
 
-## 5. Build a definition
+## 5. Prefill the builder's publishing target (optional)
+
+By default the builder asks for the provider, the namespace and the repository
+name on every execution environment, even though the answer is always the same.
+The wizard is a Backstage template, so those fields take defaults.
+
+[`templates/ee-builder-preset.yaml`](templates/ee-builder-preset.yaml) is Red
+Hat's *start from scratch* template with two changes:
+
+- the provider list holds GitHub only, so there is nothing to select
+- `sourceControlProvider` carries a default of your namespace and repository
+
+Replace `CHANGEME_GITHUB_OWNER` and `CHANGEME_DEFINITIONS_REPO`, then put the
+file where the portal can read it. The definitions repository is a good home,
+private or not, because the portal already has a token for it. Register it
+alongside the stock templates in `app-config.production.yaml`:
+
+```yaml
+catalog:
+  locations:
+    - type: url
+      target: https://github.com/<owner>/<definitions-repo>/blob/main/.portal/ee-builder-preset.yaml
+      rules:
+        - allow: [Template]
+```
+
+Restart the portal, and **Create** lists *Execution Environment (preset
+repository)* beside the stock templates. Keep the stock ones registered: this
+copy is pinned to v2.0.1 of the upstream template and will not pick up Red Hat's
+changes.
+
+A second way to prefill, with no config change: every EE the builder publishes
+includes `<name>-template.yml`, a saved template of that build. Register one of
+those and the wizard opens with *everything* prefilled — collections included —
+which suits cloning an existing EE rather than starting a new one.
+
+## 6. Build a definition
 
 In the portal: **Create** > the execution environment template > fill in the
 collections, Python and system dependencies > choose to publish to source
