@@ -191,11 +191,10 @@
       when: _use_override | bool
 
     - name: Remove galaxy sources that are server aliases rather than URLs
-      ansible.builtin.replace:
+      ansible.builtin.lineinfile:
         path: "{{ _definition_file }}"
-        regexp: '(?m)^[ 	]*source:[ 	]*(?!https?://)\S+[ 	]*?
-'
-        replace: ''
+        regexp: '^\s*source:\s*(?!https?://)\S+\s*$'
+        state: absent
       when: ee_strip_alias_sources | bool
       register: _stripped
 
