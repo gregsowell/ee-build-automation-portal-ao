@@ -37,6 +37,13 @@
     build_attempt: 0
     ee_workdir_base: /var/tmp/ee-builds
     ee_build_log_lines: 150
+    # The automation portal writes 'source: <server alias>' on each collection,
+    # which ansible-galaxy rejects: it wants a Galaxy API URL there. The alias
+    # only means something in the ansible.cfg the portal ships beside the
+    # definition, which ansible-builder never reads. Stripping those lines lets
+    # the configured server list resolve the collections instead. Set this to
+    # false to build the definition exactly as written.
+    ee_strip_alias_sources: true
     # The orchestrator caps an agent prompt at 10000 characters, and the prompt
     # carries both of these, so they are trimmed to leave room for the rest.
     ee_build_log_max_chars: 2500
@@ -182,6 +189,15 @@
         dest: "{{ _definition_file }}"
         mode: "0644"
       when: _use_override | bool
+
+    - name: Remove galaxy sources that are server aliases rather than URLs
+      ansible.builtin.replace:
+        path: "{{ _definition_file }}"
+        regexp: '(?m)^[ 	]*source:[ 	]*(?!https?://)\S+[ 	]*?
+'
+        replace: ''
+      when: ee_strip_alias_sources | bool
+      register: _stripped
 
     - name: Read the definition being built
       ansible.builtin.slurp:
@@ -371,12 +387,21 @@
           ee_definition: "{{ _definition_for_agent }}"
           ee_definition_path: "{{ ee_definition_path }}"
           ee_definition_source: "{{ 'ai_override' if _use_override | bool else 'repository' }}"
+          ee_definition_normalized: "{{ _stripped.changed | default(false) }}"
           ee_build_log_tail: "{{ _log_for_agent }}"
           ee_build_attempt: "{{ build_attempt | int }}"
           ee_build_host: "{{ inventory_hostname }}"
           ee_repo_url: "{{ ee_repo_url }}"
           ee_git_ref: "{{ ee_git_ref }}"
           ee_git_commit: "{{ _clone.after | default('') }}"
+
+    - name: Say when alias sources were removed
+      when: _stripped.changed | default(false)
+      ansible.builtin.debug:
+        msg: >-
+          Removed 'source:' server aliases from {{ ee_definition_path }} before
+          building; ansible-galaxy resolves collections through the configured
+          server list instead.
 
     - name: Show the result
       ansible.builtin.debug:

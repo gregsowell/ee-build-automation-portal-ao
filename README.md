@@ -136,9 +136,12 @@ Then:
   certificate a base image cannot chain fails at download time with
   "unable to get local issuer certificate" even though discovery worked.
 - **Definitions from the portal set `source:` to a server alias**, which
-  `ansible-galaxy` rejects: it wants an HTTP Galaxy URL there. The agent strips
-  those and lets the configured server list resolve the collections, so the
-  chain self-corrects, but it costs a build attempt.
+  `ansible-galaxy` rejects: it wants an HTTP Galaxy URL there. The alias only
+  means something in the `ansible.cfg` the portal ships beside the definition,
+  which `ansible-builder` never reads. The build strips those lines before
+  building (`ee_strip_alias_sources`, on by default), so a portal definition
+  builds first try instead of costing an attempt and an approval every time.
+  A `source:` holding a real URL is left alone.
 - **Base images need an explicit tag.** `registry.redhat.io` rejects `latest`
   for the ee-minimal repositories.
 
