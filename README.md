@@ -142,6 +142,25 @@ Then:
 - **Base images need an explicit tag.** `registry.redhat.io` rejects `latest`
   for the ee-minimal repositories.
 
+## A private definitions repository
+
+The portal writes your hub's hostname into each EE's `ansible.cfg`, so a public
+definitions repository advertises where your hub lives. Making it private works,
+with a token:
+
+1. Put a token in `secrets.yml` as `github_token` — the same fine-grained token
+   the portal uses is fine, scoped to that repository with **Contents: read**.
+2. Rerun `setup/configure_aap.yml`. It creates an **EE Definitions Git Token**
+   credential and attaches it to the build and forward job templates.
+3. Flip the repository to private.
+
+Without the token, a private repository fails in two places, and the first is
+silent: the forward step reads each changed file to decide whether it is a
+definition, gets a 404, concludes there is nothing to build, and reports
+success. The build step's clone then fails outright. With the token, the
+forward step reads through the GitHub contents API and the build clones with
+the token injected into the URL, both silenced so neither reaches a job log.
+
 ## Removing one again
 
 Demos leave execution environments behind in three places. Run the **EE Build |

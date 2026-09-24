@@ -23,6 +23,8 @@
     ee_project_branch: main
     ee_registry_credential_type: EE Build Registries
     ee_registry_credential_name: EE Build Registries
+    ee_git_credential_type: EE Definitions Git Token
+    ee_git_credential_name: EE Definitions Git Token
     ao_credential_type: Automation Orchestrator Service Account
     ao_credential_name: Automation Orchestrator Service Account
     ee_build_job_template: EE Build | Build Image
@@ -127,6 +129,33 @@
       ansible.builtin.set_fact:
         _registry_type_id: "{{ upsert_id }}"
 
+    - name: Create the definitions repository credential type
+      when: github_token | default('', true) | length > 0
+      vars:
+        upsert_api: "{{ _controller_api }}"
+        upsert_path: credential_types
+        upsert_body:
+          name: "{{ ee_git_credential_type }}"
+          description: Token for reading a private execution environment definitions repository.
+          kind: cloud
+          inputs:
+            fields:
+              - id: ee_git_token
+                type: string
+                label: GitHub token
+                secret: true
+            required:
+              - ee_git_token
+          injectors:
+            extra_vars:
+              ee_git_token: "{% raw %}{{ ee_git_token }}{% endraw %}"
+      ansible.builtin.include_tasks: tasks/upsert.yml
+
+    - name: Keep the definitions repository credential type ID
+      when: github_token | default('', true) | length > 0
+      ansible.builtin.set_fact:
+        _git_type_id: "{{ upsert_id }}"
+
     - name: Create the orchestrator credential type
       vars:
         upsert_api: "{{ _controller_api }}"
@@ -184,6 +213,25 @@
     - name: Keep the registry credential ID
       ansible.builtin.set_fact:
         _registry_credential_id: "{{ upsert_id }}"
+
+    - name: Create the definitions repository credential
+      when: github_token | default('', true) | length > 0
+      vars:
+        upsert_api: "{{ _controller_api }}"
+        upsert_path: credentials
+        upsert_body:
+          name: "{{ ee_git_credential_name }}"
+          organization: "{{ _org_id | int }}"
+          credential_type: "{{ _git_type_id | int }}"
+          inputs:
+            ee_git_token: "{{ github_token }}"
+      ansible.builtin.include_tasks: tasks/upsert.yml
+      no_log: true
+
+    - name: Keep the definitions repository credential ID
+      ansible.builtin.set_fact:
+        _git_credential_id: >-
+          {{ upsert_id if github_token | default('', true) | length > 0 else '' }}
 
     - name: Create the orchestrator credential
       vars:
@@ -374,7 +422,9 @@
       ansible.builtin.include_tasks: tasks/set_job_template_credentials.yml
       loop:
         - name: "{{ ee_build_job_template }}"
-          credentials: "{{ [_machine_credential_id, _registry_credential_id] }}"
+          credentials: >-
+            {{ [_machine_credential_id, _registry_credential_id]
+               + ([_git_credential_id] if _git_credential_id | length > 0 else []) }}
         - name: "{{ ee_register_job_template }}"
           credentials: >-
             {{ [_machine_credential_id, _registry_credential_id]
@@ -384,7 +434,9 @@
         - name: "{{ ee_notify_job_template }}"
           credentials: []
         - name: "{{ ee_forward_job_template }}"
-          credentials: "{{ [_ao_credential_id] }}"
+          credentials: >-
+            {{ [_ao_credential_id]
+               + ([_git_credential_id] if _git_credential_id | length > 0 else []) }}
         - name: "{{ ee_cleanup_job_template }}"
           credentials: >-
             {{ [_machine_credential_id, _registry_credential_id]

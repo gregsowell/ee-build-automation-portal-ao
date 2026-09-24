@@ -38,7 +38,12 @@
     ee_definition_any_keys:
       - images
       - dependencies
+    # A token is only needed for a private definitions repository. With one,
+    # the file is read through the API, which serves private content; without
+    # one, the public raw host is used.
+    ee_git_token: ""
     ee_raw_url_base: https://raw.githubusercontent.com
+    ee_github_api: https://api.github.com
 
   tasks:
     - name: Check the required variables
@@ -91,12 +96,21 @@
     # Reading the file settles what it is, instead of guessing from its name.
     - name: Fetch each changed YAML file at this commit
       ansible.builtin.uri:
-        url: "{{ ee_raw_url_base }}/{{ _repo_full_name }}/{{ _sha }}/{{ item }}"
+        url: >-
+          {{ (ee_github_api ~ '/repos/' ~ _repo_full_name ~ '/contents/' ~ item ~ '?ref=' ~ _sha)
+             if ee_git_token | length > 0
+             else (ee_raw_url_base ~ '/' ~ _repo_full_name ~ '/' ~ _sha ~ '/' ~ item) }}
+        headers: >-
+          {{ {'Authorization': 'Bearer ' ~ ee_git_token,
+              'Accept': 'application/vnd.github.raw',
+              'X-GitHub-Api-Version': '2022-11-28'}
+             if ee_git_token | length > 0 else {} }}
         return_content: true
         status_code: [200, 404]
       loop: "{{ _candidates }}"
       register: _fetched
       changed_when: false
+      no_log: "{{ ee_git_token | length > 0 }}"
 
     - name: Keep the files that are execution environment definitions
       vars:

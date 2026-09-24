@@ -31,6 +31,8 @@
 
   vars:
     ee_git_ref: main
+    # Needed only for a private definitions repository.
+    ee_git_token: ""
     ee_definition_override: ""
     build_attempt: 0
     ee_workdir_base: /var/tmp/ee-builds
@@ -106,11 +108,16 @@
 
     - name: Clone the definition repository at {{ ee_git_ref }}
       ansible.builtin.git:
-        repo: "{{ ee_repo_url }}"
+        # A token is injected into the URL for a private repository. The task
+        # is silenced so it never reaches the job output.
+        repo: >-
+          {{ ee_repo_url | regex_replace('^https://', 'https://x-access-token:' ~ ee_git_token ~ '@')
+             if ee_git_token | length > 0 else ee_repo_url }}
         dest: "{{ _build_dir }}"
         version: "{{ ee_git_ref }}"
         force: true
       register: _clone
+      no_log: "{{ ee_git_token | length > 0 }}"
 
     - name: Set the definition file path
       ansible.builtin.set_fact:
