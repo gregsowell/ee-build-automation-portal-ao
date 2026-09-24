@@ -41,6 +41,12 @@ also exposes no execution ID to a step and, on this deployment, script steps are
 disabled. Staging the file is what is left, and it keeps the loop free of
 cross-step references.
 
+**Recreating this somewhere else?** [INSTRUCTIONS.md](INSTRUCTIONS.md) is a
+phase-by-phase runbook written for an AI agent to follow, starting with the
+questions to ask about which pieces you want. It carries every fix this build
+needed, and a troubleshooting section for the failures that report success while
+doing nothing.
+
 ## What is in here
 
 | Path | What it is |
@@ -59,7 +65,9 @@ cross-step references.
 | `setup/configure_aap.yml` | Creates the credentials, project, job templates and EDA wiring in AAP. |
 | `setup/sync_hub_collections.yml` | Syncs a pinned set of collections into the hub's community repository, so hub-only builds have content to pull. |
 | `setup/configure_ao.yml` | Creates the orchestrator service account and imports and publishes the workflow. |
-| `portal/README.md` | Configuring the portal to publish definitions to GitHub. |
+| `portal/README.md` | Configuring the portal: GitHub publishing, and its collection catalog. |
+| `definitions-repo/` | Files that belong in the definitions repository, not this one. |
+| `INSTRUCTIONS.md` | Build the whole chain from scratch, written for an agent to follow. |
 | `examples/` | One definition that builds and one that fails on purpose. |
 
 Nothing here holds a secret or a hostname. Every environment-specific value is a

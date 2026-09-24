@@ -1,0 +1,38 @@
+---
+# Merge the pull requests the automation portal opens for execution environments.
+#
+# The portal opens one per EE, and merging it is what starts the build chain.
+# In a lab where the portal is the only author, that click adds nothing, so
+# this merges those pull requests and leaves every other one alone.
+#
+# To go back to reviewing them by hand, disable this workflow under
+# Actions > Auto-merge portal EE pull requests, or delete this file.
+name: Auto-merge portal EE pull requests
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  merge:
+    # Only the portal's own pull requests, raised from a branch in this
+    # repository by its owner. Anything from a fork, or with a different
+    # title, is left for a human.
+    if: >-
+      startsWith(github.event.pull_request.title, '[AAP] Adds/updates files for Execution Environment') &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login == github.repository_owner
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge the pull request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          echo "Merging #${PR}: ${{ github.event.pull_request.title }}"
+          gh pr merge "$PR" --repo "$REPO" --squash --delete-branch
