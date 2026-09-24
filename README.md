@@ -25,12 +25,14 @@ flowchart TD
     J -->|rejected| N
     K --> L[(Private automation hub<br/>container registry)]
     K --> M[Execution environment<br/>in AAP]
+    J -->|approved| W[Write the fix back<br/>to the definitions repo]
 ```
 
-The corrected definition never reaches Git. It is passed from the AI step to a
-staging step, which writes it to a scratch file on the build host that the next
-attempt picks up. What you merged stays what is in `main` until you choose to
-put the fix there.
+While the loop runs, the corrected definition never reaches Git: the AI step
+hands it to a staging step, which writes it to a scratch file on the build host
+that the next attempt picks up. It is written back to `main` only after a human
+approves it **and** the image registers, so what lands in the repository is a
+definition that demonstrably built.
 
 **Why a staging step rather than a workflow variable:** the orchestrator refuses
 any reference to a step that has not run yet, and it has no default-value
@@ -46,6 +48,7 @@ cross-step references.
 | `playbooks/ee_build.yml` | Builds the image with `ansible-builder`. Reports the outcome through `set_stats` instead of failing, so the orchestrator can read the log and retry. |
 | `playbooks/ee_register.yml` | Pushes the image to private automation hub and creates or updates the execution environment in AAP. |
 | `playbooks/ee_apply_fix.yml` | Reads the agent's answer, decides whether a retry is warranted, and stages the corrected definition on the build host for the next attempt. |
+| `playbooks/ee_commit_fix.yml` | Writes an approved fix back to the definitions repository, after the image registers. |
 | `playbooks/ee_notify.yml` | Reports a build that failed, was rejected, or that the agent would not retry. |
 | `playbooks/ao_forward_event.yml` | Turns a GitHub push into one orchestrator trigger call per changed definition. |
 | `playbooks/ee_cleanup.yml` | Removes an execution environment from controller, hub and the build host. Job template **EE Build \| Remove EE**, with a survey. |
@@ -193,13 +196,30 @@ running it again.
 | A build succeeds after the agent changed something | A human approves before the image is published. |
 | Four attempts pass with no working build | The workflow notifies. |
 
-## The AI never writes to Git
+## Writing an approved fix back
 
-The corrected definition only exists in the workflow run and in the build host's
-working directory. If you want to keep a fix, take the definition from the
-approval prompt or the build job's artifacts and open a pull request yourself.
-That keeps `main` reviewed and stops a repaired build from triggering itself
-again through the webhook.
+Left alone, the repository would keep a definition that is known not to build,
+while the image that shipped exists only as a tag in the hub — and the next push
+would re-run the same repair and ask for the same approval again. So once a
+human approves the agent's work and the image registers, the definition that
+built is committed to `main`.
+
+What makes that safe:
+
+- **It happens after registration, not after approval alone.** Only a definition
+  that demonstrably produced an image is written back, which keeps
+  environment-specific "fixes" for a passing network or registry blip out of the
+  repository.
+- **The commit carries its provenance**: the agent's summary and root cause, the
+  failure category, the image tag, and the build job URL. `git log` on the file
+  tells the whole story, and the previous version is the commit's parent — no
+  sidecar copy to rot.
+- **It does not trigger itself.** The message carries `[skip-ee-build]`, which
+  the rulebook ignores.
+- **It never clobbers.** If the file changed in the repository after the build
+  started, the step reports `changed_upstream` and leaves it alone.
+- **`ee_commit_ai_fix: false`** turns it off, for a demo where the repair should
+  stay repeatable.
 
 ## Can EDA call the orchestrator directly?
 

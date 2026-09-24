@@ -439,6 +439,34 @@
         "x": 2450,
         "y": -140
       }
+    },
+    {
+      "id": "commit_ai_fix",
+      "type": "aap_job_template",
+      "name": "Write The Fix Back To Git",
+      "parameters": {
+        "diff_mode": false,
+        "credential_id": "CREDENTIAL_ID_PLACEHOLDER",
+        "integration_id": "INTEGRATION_ID_PLACEHOLDER",
+        "job_template_name": "EE Build | Commit AI Fix",
+        "organization_name": "Default",
+        "extra_vars": {
+          "ee_name": "${build_ee.artifacts.ee_name}",
+          "ee_definition_path": "${build_ee.artifacts.ee_definition_path}",
+          "ee_definition_file": "${build_ee.artifacts.ee_definition_file}",
+          "ee_repo_url": "${build_ee.artifacts.ee_repo_url}",
+          "ee_git_ref": "${build_ee.artifacts.ee_git_ref}",
+          "ee_ai_summary": "${apply_ai_fix.artifacts.ee_ai_summary}",
+          "ee_ai_root_cause": "${apply_ai_fix.artifacts.ee_ai_root_cause}",
+          "ee_ai_category": "${apply_ai_fix.artifacts.ee_ai_category}",
+          "ee_registered_image": "${register_after_approval.artifacts.ee_registered_image}",
+          "ee_job_url": "${build_ee.job_url}"
+        }
+      },
+      "position": {
+        "x": 2750,
+        "y": 60
+      }
     }
   ],
   "edges": [
@@ -513,6 +541,10 @@
       "from": "check_fix_staged",
       "to": "notify_no_retry",
       "from_port": "false"
+    },
+    {
+      "from": "register_after_approval",
+      "to": "commit_ai_fix"
     }
   ]
 }

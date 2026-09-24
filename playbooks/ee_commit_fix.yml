@@ -1,0 +1,168 @@
+---
+# Commit the agent's corrected definition back to the definitions repository,
+# after a human approved it and the image was registered.
+#
+# Job template: "EE Build | Commit AI Fix"  (prompt on launch: extra variables)
+# Inventory:    the inventory holding the build host, limited to that host
+# Credentials:  a machine credential for the build host
+#               + "EE Definitions Git Token"
+#
+# Why: without this the repository keeps a definition that is known not to
+# build, while the image that shipped exists only as a tag in the hub. The next
+# push re-runs the same repair and asks for the same approval again.
+#
+# The file is read from the build directory rather than from a job artifact,
+# because that artifact is trimmed to fit the agent's prompt.
+#
+# Required variables
+#   ee_name, ee_definition_path, ee_definition_file, ee_repo_url, ee_git_ref
+# Provenance recorded in the commit message
+#   ee_ai_summary, ee_ai_root_cause, ee_ai_category, ee_registered_image, ee_job_url
+- name: Commit the agent's fix back to the definitions repository
+  hosts: "{{ ee_build_host | default('ee-builder') }}"
+  gather_facts: false
+
+  vars:
+    ee_commit_ai_fix: true
+    ee_git_token: ""
+    ee_git_branch: main
+    ee_github_api: https://api.github.com
+    ee_ai_summary: ""
+    ee_ai_root_cause: ""
+    ee_ai_category: ""
+    ee_registered_image: ""
+    ee_job_url: ""
+    # The rulebook ignores commits carrying this, so writing the fix back does
+    # not start another build of the definition that just built.
+    ee_skip_marker: "[skip-ee-build]"
+
+  tasks:
+    - name: Check the required variables
+      ansible.builtin.assert:
+        that:
+          - ee_name | default('', true) | length > 0
+          - ee_definition_path | default('', true) | length > 0
+          - ee_definition_file | default('', true) | length > 0
+          - ee_repo_url | default('', true) | length > 0
+        fail_msg: >-
+          ee_name, ee_definition_path, ee_definition_file and ee_repo_url are
+          required.
+
+    - name: Stop when writing back is switched off
+      when: not ee_commit_ai_fix | bool
+      block:
+        - name: Say so
+          ansible.builtin.set_stats:
+            aggregate: false
+            per_host: false
+            data:
+              ee_commit_result: skipped
+              ee_commit_reason: disabled
+
+        - name: End the play
+          ansible.builtin.meta: end_play
+
+    - name: Work out which repository this is
+      ansible.builtin.set_fact:
+        _repo: >-
+          {{ ee_repo_url | regex_replace('^https://[^/]+/', '')
+                         | regex_replace('\.git$', '') }}
+
+    - name: Read the definition that was built
+      ansible.builtin.slurp:
+        src: "{{ ee_definition_file }}"
+      register: _built
+
+    - name: Look at the file in the repository
+      delegate_to: localhost
+      ansible.builtin.uri:
+        url: "{{ ee_github_api }}/repos/{{ _repo }}/contents/{{ ee_definition_path }}?ref={{ item }}"
+        headers:
+          Authorization: "Bearer {{ ee_git_token }}"
+          Accept: application/vnd.github+json
+          X-GitHub-Api-Version: "2022-11-28"
+        status_code: [200, 404]
+      loop:
+        - "{{ ee_git_branch }}"
+        - "{{ ee_git_ref }}"
+      register: _contents
+      no_log: true
+
+    - name: Compare what is there with what was built
+      ansible.builtin.set_fact:
+        _head: "{{ _contents.results[0] }}"
+        _at_build: "{{ _contents.results[1] }}"
+        _built_content: "{{ _built.content | b64decode }}"
+
+    # The build may have started from an older commit, or someone may have
+    # edited the file since. Either way the fix is not applied blindly.
+    - name: Decide whether to commit
+      ansible.builtin.set_fact:
+        _moved_on: >-
+          {{ _head.status == 200 and _at_build.status == 200
+             and _head.json.sha != _at_build.json.sha }}
+        _unchanged: >-
+          {{ _head.status == 200
+             and (_head.json.content | b64decode) == _built_content }}
+
+    - name: Write the definition back
+      when:
+        - _head.status == 200
+        - not _moved_on | bool
+        - not _unchanged | bool
+      delegate_to: localhost
+      ansible.builtin.uri:
+        url: "{{ ee_github_api }}/repos/{{ _repo }}/contents/{{ ee_definition_path }}"
+        method: PUT
+        headers:
+          Authorization: "Bearer {{ ee_git_token }}"
+          Accept: application/vnd.github+json
+          X-GitHub-Api-Version: "2022-11-28"
+        body_format: json
+        body:
+          message: |-
+            Apply the agent's fix to {{ ee_name }} {{ ee_skip_marker }}
+
+            {{ ee_ai_summary | default('The build agent corrected this definition.', true) }}
+
+            Root cause: {{ ee_ai_root_cause | default('not recorded', true) }}
+            Category: {{ ee_ai_category | default('not recorded', true) }}
+            Built and registered as: {{ ee_registered_image | default('not recorded', true) }}
+            Build job: {{ ee_job_url | default('not recorded', true) }}
+
+            Approved by a human in the Build-EE workflow before this was written
+            back. The previous version is the parent of this commit.
+          content: "{{ _built_content | b64encode }}"
+          sha: "{{ _head.json.sha }}"
+          branch: "{{ ee_git_branch }}"
+        status_code: [200, 201]
+      register: _commit
+      no_log: true
+
+    - name: Work out what happened
+      ansible.builtin.set_fact:
+        _result: >-
+          {{ 'committed' if _commit is not skipped
+             else ('file_missing' if _head.status != 200
+                   else ('changed_upstream' if _moved_on | bool else 'already_current')) }}
+
+    - name: Publish the result
+      ansible.builtin.set_stats:
+        aggregate: false
+        per_host: false
+        data:
+          ee_commit_result: "{{ _result }}"
+          ee_commit_sha: "{{ (_commit.json.commit.sha | default('')) if _commit is not skipped else '' }}"
+          ee_commit_path: "{{ ee_definition_path }}"
+
+    - name: Say what happened
+      ansible.builtin.debug:
+        msg: >-
+          {{ {
+               'committed': "Wrote the agent's fix back to " ~ ee_definition_path
+                            ~ " on " ~ ee_git_branch ~ " as "
+                            ~ ((_commit.json.commit.sha | default(''))[:7] if _commit is not skipped else ''),
+               'already_current': ee_definition_path ~ ' already matches what was built; nothing to commit.',
+               'changed_upstream': ee_definition_path ~ ' changed in the repository since this build started, so it was left alone.',
+               'file_missing': ee_definition_path ~ ' is no longer in the repository, so there was nothing to update.'
+             }[_result] }}

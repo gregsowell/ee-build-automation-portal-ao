@@ -390,6 +390,10 @@
           ee_build_log_tail: "{{ _log_for_agent }}"
           ee_build_attempt: "{{ build_attempt | int }}"
           ee_build_host: "{{ inventory_hostname }}"
+          # The definition artifact above is trimmed to fit an agent prompt, so
+          # anything that needs the exact file reads it from here instead.
+          ee_definition_file: "{{ _definition_file }}"
+          ee_build_dir: "{{ _build_dir }}"
           ee_repo_url: "{{ ee_repo_url }}"
           ee_git_ref: "{{ ee_git_ref }}"
           ee_git_commit: "{{ _clone.after | default('') }}"

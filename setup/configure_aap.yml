@@ -34,6 +34,7 @@
     ee_forward_job_template: EE Build | Forward Event to AO
     ee_prep_job_template: EE Build | Prep Builder Host
     ee_cleanup_job_template: EE Build | Remove EE
+    ee_commit_job_template: EE Build | Commit AI Fix
     ee_localhost_inventory: Demo Inventory
     ee_aap_credential_name: aap
     # --- EDA ----------------------------------------------------------------
@@ -368,6 +369,15 @@
           playbook: playbooks/ee_apply_fix.yml
           limit: "{{ ee_build_host_limit }}"
           ask_variables_on_launch: true
+        - name: "{{ ee_commit_job_template }}"
+          description: Writes an approved agent fix back to the definitions repository.
+          job_type: run
+          organization: "{{ _org_id | int }}"
+          inventory: "{{ _build_inventory_id | int }}"
+          project: "{{ _project_id | int }}"
+          playbook: playbooks/ee_commit_fix.yml
+          limit: "{{ ee_build_host_limit }}"
+          ask_variables_on_launch: true
         - name: "{{ ee_notify_job_template }}"
           description: Reports the outcome of an execution environment build.
           job_type: run
@@ -431,6 +441,10 @@
                + ([_aap_credential_id] if _aap_credential_id | length > 0 else []) }}
         - name: "{{ ee_apply_fix_job_template }}"
           credentials: "{{ [_machine_credential_id] }}"
+        - name: "{{ ee_commit_job_template }}"
+          credentials: >-
+            {{ [_machine_credential_id]
+               + ([_git_credential_id] if _git_credential_id | length > 0 else []) }}
         - name: "{{ ee_notify_job_template }}"
           credentials: []
         - name: "{{ ee_forward_job_template }}"
