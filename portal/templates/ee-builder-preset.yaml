@@ -7,8 +7,13 @@
 # somewhere the portal can read, and register it under catalog.locations.
 # See portal/README.md.
 #
-# Derived from ansible/ansible-rhdh-templates v2.0.1; everything else is
-# unchanged so it stays in step with the Red Hat template.
+# The defaults sit on sourceControlProvider's sub-properties rather than on
+# the object: a default on the object itself is not applied to a field inside
+# a dependencies branch, so ScmSelector never sees it. The sub-properties are
+# not rendered - ui:field replaces the widget - they only seed the form data
+# the selector reads.
+#
+# Derived from ansible/ansible-rhdh-templates v2.0.1.
 apiVersion: scaffolder.backstage.io/v1beta3
 kind: Template
 metadata:
@@ -283,12 +288,22 @@ spec:
                         - workflow
                         gitlab:
                         - write_repository
-                  default:
-                    provider: github
-                    host: github.com
-                    org: CHANGEME_GITHUB_OWNER
-                    repoName: CHANGEME_DEFINITIONS_REPO
-                    repoExists: true
+                  properties:
+                    provider:
+                      type: string
+                      default: github
+                    providerLabel:
+                      type: string
+                      default: Github
+                    org:
+                      type: string
+                      default: CHANGEME_GITHUB_OWNER
+                    repoName:
+                      type: string
+                      default: CHANGEME_DEFINITIONS_REPO
+                    repoExists:
+                      type: boolean
+                      default: true
               required:
               - sourceControlProvider
               dependencies:

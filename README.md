@@ -41,6 +41,9 @@ also exposes no execution ID to a step and, on this deployment, script steps are
 disabled. Staging the file is what is left, and it keeps the loop free of
 cross-step references.
 
+**Demoing this?** [DEMO.md](DEMO.md) has a rehearsed failure, its measured
+timings, and why that particular breakage suits a stage.
+
 **Recreating this somewhere else?** [INSTRUCTIONS.md](INSTRUCTIONS.md) is a
 phase-by-phase runbook written for an AI agent to follow, starting with the
 questions to ask about which pieces you want. It carries every fix this build
