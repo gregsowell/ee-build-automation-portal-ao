@@ -169,6 +169,11 @@ Then:
   building (`ee_strip_alias_sources`, on by default), so a portal definition
   builds first try instead of costing an attempt and an approval every time.
   A `source:` holding a real URL is left alone.
+- **A reused build context hides a removed dependency.** `ansible-builder`
+  rewrites `requirements.txt` only when the definition still declares Python
+  dependencies, so a repair that *removes* one leaves the previous attempt's
+  file in place and the build fails on a constraint that is no longer written
+  down anywhere. The build clears the context before generating it.
 - **Base images need an explicit tag.** `registry.redhat.io` rejects `latest`
   for the ee-minimal repositories.
 

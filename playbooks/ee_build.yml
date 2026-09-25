@@ -245,6 +245,15 @@
     - name: Build the image with ansible-builder
       when: _definition_parse is not failed
       block:
+        # ansible-builder only rewrites a requirements file when the
+        # definition still declares that kind of dependency, so a fix that
+        # removes one leaves the previous attempt's file in a reused context
+        # and the build fails on a constraint that is no longer written down.
+        - name: Clear the previous build context
+          ansible.builtin.file:
+            path: "{{ _context_dir }}/context"
+            state: absent
+
         - name: Generate the build context
           ansible.builtin.shell:
             cmd: >-
