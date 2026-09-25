@@ -10,20 +10,24 @@ GUI.
 |---|---|
 | Name | `demo-quick` (lowercase; a capital letter breaks the EE's own catalog entry) |
 | Base image | `ee-minimal-rhel9:2.18` |
-| Collections | `ansible.utils`, source *private hub community*, **Version: `99.9.9`** |
-| Python / system packages | none |
+| Collections | `ansible.utils`, source *private hub community*, no version |
+| Python packages | **`jmespathh`** — the deliberate typo, press Add so it becomes a chip |
 | Publish to a Git repository | yes, the definitions repository |
 
-The whole trick is the version box. `ansible.utils` is real and in your hub;
-`99.9.9` is not a version of it, so dependency resolution fails immediately. The
-agent removes the invalid pin and the rebuild takes whatever the hub holds.
+The whole trick is one missing letter in a package name. `jmespathh` does not
+exist on PyPI, so the assemble step fails; the agent corrects it to `jmespath`
+and the rebuild succeeds.
 
-**Why the version field and not a misspelled collection name:** the builder's
-collection picker only offers what it has discovered from the hub — you cannot
-type a name that does not exist. The **Version** box and the **Python/system
-package** boxes are free text, so those are the only places a demo fault can be
-introduced through the GUI. A hand-written definition can of course misspell
-anything.
+**Why a Python package and not a collection name or a version:**
+
+- The **collection picker** only offers what it discovered from your hub, so a
+  name that does not exist cannot be typed at all.
+- The **Version** box is free text, but its value is only committed when you
+  select an option or press Enter. Typing `99.9.9` and clicking Next drops it
+  silently: the portal writes the definition with no version line, the build
+  succeeds, and the demo has no failure to repair. Confirmed on a real run.
+- The **package boxes** commit as chips when you press Add, so what you typed is
+  visibly in the form and reliably reaches the definition.
 
 ## What it costs in wall-clock time
 
@@ -31,27 +35,26 @@ Measured, from the merge to the approval prompt:
 
 | | |
 |---|---|
-| First build fails | 48s |
-| Agent answers | +9s |
-| Fix staged for the retry | 74s |
-| Rebuild succeeds | 127s |
-| **Approval prompt appears** | **2m 08s** |
-| Registered in hub and AAP | +37s after you approve |
-| Fix committed back to Git | +54s after you approve |
+| First build fails | 63s |
+| Agent answers | +6s |
+| Fix staged for the retry | 86s |
+| Rebuild succeeds | 161s |
+| **Approval prompt appears** | **2m 42s** |
+| Registered in hub and AAP | +38s after you approve |
+| Fix committed back to Git | +55s after you approve |
 
-About three minutes, with one natural pause at the approval.
+About three and a half minutes, with one natural pause at the approval.
 
 What the agent said, verbatim:
 
-> The build failed because the Galaxy collection dependency pins ansible.utils
-> to version 99.9.9, which Galaxy cannot satisfy. The fix keeps the collection
-> but removes the invalid version pin so ansible-galaxy can install an available
-> version.
+> The build failed while installing Python requirements because the package name
+> `jmespathh` does not exist on PyPI. Correcting it to `jmespath` is the
+> smallest change needed.
 
 ## Why this failure and not another
 
-- **It fails at dependency resolution**, the first real step, so nobody watches
-  image layers build before anything interesting happens.
+- **It fails at the assemble step**, after the collections install — about a
+  minute in, which is long enough to narrate and short enough to hold a room.
 - **It is deterministic.** No network timing, no registry moods.
 - **The fix is inside the definition**, so the agent can apply it. A network or
   registry fault is classified `requires_human_review` and the loop deliberately
@@ -65,10 +68,10 @@ What the agent said, verbatim:
 
 ## For a longer version
 
-Add a Python requirement of `jmespathh` alongside the bad version pin. The agent
-fixes the version first and the package name second: it only ever addresses the
-first real error in a log, which is itself worth narrating. Budget roughly
-double the time.
+Add a second bad package, or hand-write a definition with a misspelled
+collection *and* a misspelled package. The agent fixes the first real error in
+the log on each pass, so two faults means two cycles — which is itself worth
+narrating. Budget roughly double the time.
 
 ## Before you start
 
@@ -78,6 +81,9 @@ double the time.
 - Check the LLM integration is healthy: **Configuration > Integrations** in the
   orchestrator.
 - Have **EE Build | Remove EE** open and ready for afterwards.
+- **Glance at the pull request before merging.** The definition the portal wrote
+  is right there in the diff; confirm your fault survived the form. That check
+  costs five seconds and is what separates a demo from an apology.
 
 ## Afterwards
 
