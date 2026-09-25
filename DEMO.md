@@ -59,12 +59,14 @@ What the agent said, verbatim:
 - **The fix is inside the definition**, so the agent can apply it. A network or
   registry fault is classified `requires_human_review` and the loop deliberately
   stops — worth demonstrating, but it is not a repair story.
-- **The valid build stays small.** The same demo with `cisco.ios` took 5m 39s
-  instead of 2m 08s: the failing build is fast either way, but the *successful*
-  one is what the audience waits through, and that collection is large.
-- **A bad version beats a missing collection.** Naming a real collection absent
-  from the hub has one honest fix — "sync it" — which the agent cannot do. It
-  improvises, and improvisation is not repeatable on stage.
+- **The valid build stays small.** Keep to one light collection: the same shape
+  of demo with `cisco.ios` took 5m 39s instead of under three minutes. The
+  failing build is fast either way, but the *successful* one is what the
+  audience waits through.
+- **A typo beats a missing package.** Naming a real collection that is absent
+  from your hub has one honest fix — "sync it to the hub" — which the agent
+  cannot do, so it improvises, and improvisation is not repeatable on stage. A
+  misspelling has exactly one correct repair.
 
 ## For a longer version
 
