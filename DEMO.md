@@ -22,10 +22,13 @@ and the rebuild succeeds.
 
 - The **collection picker** only offers what it discovered from your hub, so a
   name that does not exist cannot be typed at all.
-- The **Version** box is free text, but its value is only committed when you
-  select an option or press Enter. Typing `99.9.9` and clicking Next drops it
-  silently: the portal writes the definition with no version line, the build
-  succeeds, and the demo has no failure to repair. Confirmed on a real run.
+- The **Version** box cannot produce a failure at all, for two reasons. Its
+  dropdown offers only versions the hub actually holds — the sync pulls a
+  collection's dependency versions too, so `ansible.utils` alone lists fourteen,
+  every one of them installable. And although the box accepts typing, the value
+  is only committed when you select an option or press Enter: type `99.9.9`,
+  click Next, and the portal writes a definition with no version line at all.
+  Both confirmed on real runs.
 - The **package boxes** commit as chips when you press Add, so what you typed is
   visibly in the form and reliably reaches the definition.
 
