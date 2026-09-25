@@ -143,6 +143,9 @@ Then:
   `${build_ee.artifacts.ee_build_result} != 'success'`, with `Then` going to the
   repair agent: the success path is handled after the loop, so it needs no
   branch of its own. An empty `Else` is fine; an empty `Then` is not.
+- **A step that publishes artifacts must publish the same set on every path.**
+  A later step referencing `x.artifacts.y` fails the run when that one path left
+  `y` out, and the error names the property rather than the path that skipped it.
 - **Taking one branch of a condition marks the other as skipped, permanently.**
   A node that two branches both point at gets skipped by the first one and stays
   skipped, so each branch here ends at its own node: two register steps and

@@ -43,35 +43,34 @@
           ee_name and ee_agent_answer are required. An unresolved ${...}
           reference means the AI step did not run.
 
+    # The answer comes back as an object on one run and as text on the next,
+    # and the text is sometimes JSON, sometimes YAML. from_yaml reads all
+    # three, since JSON is valid YAML.
     - name: Read the agent's answer
       ansible.builtin.set_fact:
         _answer: >-
           {{ ee_agent_answer if ee_agent_answer is mapping
-             else (ee_agent_answer | from_json) }}
+             else (ee_agent_answer | from_yaml) }}
       register: _parsed
       ignore_errors: true
 
-    - name: Stop when the answer cannot be read
-      when: _parsed is failed
-      block:
-        - name: Report that the answer was unreadable
-          ansible.builtin.set_stats:
-            aggregate: false
-            per_host: false
-            data:
-              ee_fix_applied: false
-              ee_fix_reason: unreadable_answer
-              ee_ai_summary: The agent's answer was neither an object nor JSON.
+    - name: Fall back to an empty answer when it cannot be read
+      ansible.builtin.set_fact:
+        _answer: {}
+      when: _parsed is failed or (_answer is not mapping)
 
-        - name: End the play
-          ansible.builtin.meta: end_play
-
+    # Field names wander when the model answers in prose rather than to the
+    # schema, so the common alternatives are accepted.
     - name: Pull out the fields the workflow needs
       vars:
         _yes: ["yes", "true", "True", true]
       ansible.builtin.set_fact:
-        _definition: "{{ _answer.updated_execution_environment_yml | default('') }}"
-        _summary: "{{ _answer.summary | default('') }}"
+        _definition: >-
+          {{ _answer.updated_execution_environment_yml
+             | default(_answer.updated_definition | default('')) }}
+        _summary: >-
+          {{ _answer.summary
+             | default(_answer.proposed_change | default(_answer.fix | default(''))) }}
         _root_cause: "{{ _answer.root_cause | default('') }}"
         _category: "{{ _answer.failure_category | default('unknown') }}"
         _retry: "{{ _answer.retry_recommended | default('no') in _yes }}"
@@ -86,8 +85,10 @@
         _reason: >-
           {{ 'ok' if _retry | bool and (not _needs_human | bool or ee_ignore_human_review | bool)
                   and _definition | trim | length > 0
-             else ('agent_declined_retry' if not _retry | bool
-                   else ('needs_human_review' if _needs_human | bool else 'no_definition_returned')) }}
+             else ('unreadable_answer' if _answer == {}
+                   else ('agent_declined_retry' if not _retry | bool
+                         else ('needs_human_review' if _needs_human | bool
+                               else 'no_definition_returned'))) }}
 
     - name: Stage the corrected definition
       when: _apply | bool
@@ -123,9 +124,9 @@
         data:
           ee_fix_applied: "{{ 'true' if _apply | bool else 'false' }}"
           ee_fix_reason: "{{ _reason }}"
-          ee_ai_summary: "{{ _summary }}"
-          ee_ai_root_cause: "{{ _root_cause }}"
-          ee_ai_category: "{{ _category }}"
+          ee_ai_summary: "{{ _summary | default('not recorded', true) }}"
+          ee_ai_root_cause: "{{ _root_cause | default('not recorded', true) }}"
+          ee_ai_category: "{{ _category | default('unknown', true) }}"
           ee_fix_path: >-
             {{ (_fix_dir ~ '/' ~ ee_name ~ '-' ~ _ref_short ~ '.yml') if _apply | bool else '' }}
 
