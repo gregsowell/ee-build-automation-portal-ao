@@ -288,11 +288,31 @@
             status_code: [200]
           no_log: true
 
-        # GitLab refuses webhooks aimed at the local network unless told
-        # otherwise, and an in-lab event stream is exactly that. Without this
-        # the hook cannot be created at all: "Url is blocked: Requests to the
-        # local network are not allowed".
-        - name: Allow webhooks to reach the local network
+        # GitLab refuses webhooks aimed at the local network: "Url is blocked:
+        # Requests to the local network are not allowed". There is a blanket
+        # setting that lifts this for every destination
+        # (allow_local_requests_from_web_hooks_and_services); this adds only
+        # the event stream's own host to the outbound allowlist instead, so
+        # every other local address stays blocked.
+        - name: Read the current outbound allowlist
+          ansible.builtin.uri:
+            url: "{{ gitlab_external_url }}/api/v4/application/settings"
+            headers:
+              PRIVATE-TOKEN: "{{ _pat }}"
+            status_code: [200]
+          register: _settings
+          no_log: true
+          changed_when: false
+
+        - name: Work out the host to allow
+          ansible.builtin.set_fact:
+            _hook_host: >-
+              {{ gitlab_webhook_url | regex_replace('^https?://', '')
+                                    | regex_replace('/.*$', '') }}
+
+        - name: Allow the event stream's host, and nothing else new
+          vars:
+            _current: "{{ _settings.json.outbound_local_requests_whitelist | default([]) }}"
           ansible.builtin.uri:
             url: "{{ gitlab_external_url }}/api/v4/application/settings"
             method: PUT
@@ -300,9 +320,16 @@
               PRIVATE-TOKEN: "{{ _pat }}"
             body_format: json
             body:
-              allow_local_requests_from_web_hooks_and_services: true
+              outbound_local_requests_whitelist: "{{ (_current + [_hook_host]) | unique }}"
             status_code: [200]
           no_log: true
+          when: _hook_host not in (_settings.json.outbound_local_requests_whitelist | default([]))
+
+        - name: Say what was allowed
+          ansible.builtin.debug:
+            msg: >-
+              {{ _hook_host }} is on GitLab's outbound allowlist; other local
+              addresses remain blocked.
 
         - name: Look for an existing webhook
           ansible.builtin.uri:
