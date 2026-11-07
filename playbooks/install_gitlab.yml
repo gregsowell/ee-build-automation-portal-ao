@@ -40,12 +40,17 @@
     gitlab_required_free_mb: 20480
     gitlab_open_firewall: true
     gitlab_firewall_service: http
-    # GitLab's repository key, then the key its packages are signed with
-    # ("GitLab, Inc. <support@gitlab.com>"). Both are needed: the first lets
-    # dnf trust the repository, the second lets it verify the rpm.
+    # Exactly the keys GitLab's own generated repository file lists, which you
+    # can check against:
+    #   https://packages.gitlab.com/install/repositories/gitlab/gitlab-ce/config_file.repo?os=el&dist=9
+    # All three are needed. The first signs the repository metadata; the other
+    # two are package signing keys, and GitLab has rotated between them --
+    # current packages are signed by AD997ACC82DD593D, the last of these, which
+    # is published under a different path than older documentation gives.
     gitlab_gpg_keys:
-      - https://packages.gitlab.com/gitlab/gitlab-ce/gpgkey
-      - https://packages.gitlab.com/gitlab/gitlab-ce/gpgkey/gitlab-gitlab-ce-3D645A26AB9FBD22.pub.gpg
+      - https://packages.gitlab.com/gpgkey/gpg.key
+      - https://packages.gitlab.com/gpgkey/gitlab/3D645A26AB9FBD22.pub.gpg
+      - https://packages.gitlab.com/gpgkey/gitlab/CB947AD886C8E8FD.pub.gpg
     # The first reconfigure compiles a great deal, and this host has two cores.
     gitlab_reconfigure_timeout: 2700
 
@@ -172,8 +177,9 @@
         baseurl: "https://packages.gitlab.com/gitlab/gitlab-ce/el/{{ ansible_distribution_major_version }}/$basearch"
         gpgkey: "{{ gitlab_gpg_keys | join('\n       ') }}"
         gpgcheck: true
-        repo_gpgcheck: false
+        repo_gpgcheck: true
         sslverify: true
+        metadata_expire: "300"
         enabled: true
 
     - name: Create the configuration directory
