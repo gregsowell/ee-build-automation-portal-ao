@@ -66,14 +66,22 @@
     - name: Reclaim space before installing
       when: gitlab_reclaim_build_layers | bool
       block:
+        # The character classes stop pgrep matching this command's own line:
+        # with -f it searches full command lines, and the pattern is in one.
         - name: Look for a build in progress
           ansible.builtin.shell:
             cmd: >-
-              pgrep -f 'ansible-builder|podman .*build|buildah' >/dev/null
+              pgrep -f '[a]nsible-builder|[p]odman .*build|[b]uildah' >/dev/null
               && echo busy || echo idle
           register: _builder_state
           changed_when: false
           failed_when: false
+
+        - name: Measure the disk before reclaiming
+          ansible.builtin.command:
+            cmd: df --output=avail -BM /
+          register: _before
+          changed_when: false
 
         - name: Say why the reclaim is being skipped
           ansible.builtin.debug:
@@ -89,6 +97,27 @@
           changed_when: _pruned.stdout | default('') | trim | length > 0
           failed_when: false
           when: _builder_state.stdout | trim != 'busy'
+
+        - name: Say how much came back
+          vars:
+            _b: "{{ _before.stdout_lines | last | regex_replace('M$', '') | int }}"
+          ansible.builtin.shell:
+            cmd: df --output=avail -BM / | tail -1
+          register: _after
+          changed_when: false
+          when: _pruned is changed
+
+        - name: Report the reclaim
+          vars:
+            _b: "{{ _before.stdout_lines | last | regex_replace('M$', '') | int }}"
+            _a: "{{ _after.stdout | trim | regex_replace('M$', '') | int }}"
+          ansible.builtin.debug:
+            msg: >-
+              Reclaimed {{ ((_a | int - _b | int) / 1024) | round(1) }} GB of
+              dangling build layers; {{ ((_a | int) / 1024) | round(1) }} GB now
+              free. Tagged images were left in place, so the base images stay
+              cached.
+          when: _pruned is changed
 
     - name: Reread the disk now that layers are gone
       ansible.builtin.setup:
