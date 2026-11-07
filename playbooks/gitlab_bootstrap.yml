@@ -21,7 +21,9 @@
 #   gitlab_webhook_url    The EDA event stream URL. Without it, no webhook is
 #                         created, which is the right order on a first run:
 #                         create the event stream first, then rerun with this.
-#   gitlab_webhook_token  Shared secret sent as X-Gitlab-Token.
+#   gitlab_webhook_token  Normally left unset: the shared secret sent as
+#                         X-Gitlab-Token is generated here and written into
+#                         both the webhook and the event stream credential.
 - name: Prepare GitLab for the build chain
   hosts: "{{ gitlab_host | default('ee-builder') }}"
   become: true
@@ -41,7 +43,13 @@
     # never drift apart.
     gitlab_rotate_token: true
     gitlab_webhook_url: ""
+    # Left empty on purpose. The shared secret between the webhook and the
+    # event stream is generated here and written into both ends, so it never
+    # travels as a job variable. Set it only to pin a specific value.
     gitlab_webhook_token: ""
+    # The Event-Driven Ansible credential holding the other end of that
+    # secret. It must already exist, carrying the GitLab Event Stream type.
+    gitlab_eda_credential_name: EE Definitions GitLab Token (event stream)
     # Event streams are usually published with a certificate the lab does not
     # chain to a public root.
     gitlab_webhook_verify_ssl: false
@@ -219,6 +227,67 @@
     - name: Set up the push webhook
       when: gitlab_webhook_url | length > 0
       block:
+        - name: Generate the shared secret for the webhook
+          ansible.builtin.command:
+            cmd: openssl rand -hex 32
+          register: _secret
+          changed_when: true
+          no_log: true
+          when: gitlab_webhook_token | length == 0
+
+        - name: Keep it for the rest of this play only
+          ansible.builtin.set_fact:
+            _hook_token: >-
+              {{ gitlab_webhook_token if gitlab_webhook_token | length > 0
+                 else _secret.stdout | trim }}
+          no_log: true
+
+        # Both ends of the secret are written in this one run, so they cannot
+        # drift apart.
+        - name: Find the event stream credential
+          ansible.builtin.uri:
+            url: >-
+              {{ _aap }}/api/eda/v1/eda-credentials/?name={{
+                 gitlab_eda_credential_name | urlencode }}
+            headers: "{{ _aap_headers }}"
+            url_username: "{{ _aap_user }}"
+            url_password: "{{ _aap_pass }}"
+            force_basic_auth: "{{ _aap_basic }}"
+            validate_certs: "{{ aap_validate_certs }}"
+            status_code: [200]
+          register: _eda_cred
+          no_log: true
+          changed_when: false
+
+        - name: Insist the event stream credential exists
+          ansible.builtin.assert:
+            that: _eda_cred.json.count | int > 0
+            fail_msg: >-
+              No Event-Driven Ansible credential named
+              "{{ gitlab_eda_credential_name }}". Create the GitLab event
+              stream and its credential first; this writes the shared secret
+              into it.
+
+        - name: Write the secret into the event stream credential
+          ansible.builtin.uri:
+            url: >-
+              {{ _aap }}/api/eda/v1/eda-credentials/{{
+                 (_eda_cred.json.results | first).id }}/
+            method: PATCH
+            headers: "{{ _aap_headers }}"
+            url_username: "{{ _aap_user }}"
+            url_password: "{{ _aap_pass }}"
+            force_basic_auth: "{{ _aap_basic }}"
+            validate_certs: "{{ aap_validate_certs }}"
+            body_format: json
+            body:
+              inputs:
+                auth_type: token
+                token: "{{ _hook_token }}"
+                http_header_key: X-Gitlab-Token
+            status_code: [200]
+          no_log: true
+
         - name: Look for an existing webhook
           ansible.builtin.uri:
             url: "{{ gitlab_external_url }}/api/v4/projects/{{ _project.id }}/hooks"
@@ -244,7 +313,7 @@
             body_format: json
             body:
               url: "{{ gitlab_webhook_url }}"
-              token: "{{ gitlab_webhook_token }}"
+              token: "{{ _hook_token }}"
               push_events: true
               merge_requests_events: false
               tag_push_events: false
@@ -262,7 +331,7 @@
             body_format: json
             body:
               url: "{{ gitlab_webhook_url }}"
-              token: "{{ gitlab_webhook_token }}"
+              token: "{{ _hook_token }}"
               push_events: true
               enable_ssl_verification: "{{ gitlab_webhook_verify_ssl | bool }}"
             status_code: [200]
@@ -376,5 +445,5 @@
           - >-
             {{ ('Webhook points at ' ~ gitlab_webhook_url)
                if gitlab_webhook_url | length > 0
-               else 'No webhook yet: create the event stream, then rerun with gitlab_webhook_url and gitlab_webhook_token.' }}
+               else 'No webhook yet: create the event stream, then rerun with gitlab_webhook_url set.' }}
           - "Clone URL for the build chain: {{ _project.http_url_to_repo }}"
