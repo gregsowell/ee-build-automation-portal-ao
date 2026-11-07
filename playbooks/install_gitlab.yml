@@ -166,13 +166,28 @@
       when: _installed is changed or _config is changed
       timeout: "{{ gitlab_reconfigure_timeout | int }}"
 
+    # firewall-cmd directly rather than ansible.posix.firewalld, so this
+    # playbook needs no collections beyond ansible.builtin and runs in any
+    # execution environment.
     - name: Open the firewall
-      ansible.posix.firewalld:
-        service: "{{ gitlab_firewall_service }}"
-        permanent: true
-        immediate: true
-        state: enabled
+      ansible.builtin.command:
+        cmd: >-
+          firewall-cmd --permanent
+          --add-service={{ gitlab_firewall_service }}
+      register: _fw
+      changed_when: "'ALREADY_ENABLED' not in _fw.stderr"
+      failed_when:
+        - _fw.rc != 0
+        - "'ALREADY_ENABLED' not in _fw.stderr"
       when: gitlab_open_firewall | bool
+
+    - name: Reload the firewall
+      ansible.builtin.command:
+        cmd: firewall-cmd --reload
+      changed_when: true
+      when:
+        - gitlab_open_firewall | bool
+        - _fw is changed
 
     - name: Wait for GitLab to answer
       ansible.builtin.uri:
