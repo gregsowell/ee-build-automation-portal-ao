@@ -421,7 +421,37 @@ healthy and the only fault was reachability.
 | Builder refuses to save: missing a connection from `Then` | The API allows a dangling branch, the builder does not | Put the used outcome on `Then` and invert the test |
 | Loop exits immediately, or never | `do_while` is evaluated **after** the body | Write the condition against the body's own output |
 | Condition errors on `true`/`false` | Bare booleans are read as step names | Compare strings: the agent answers `yes` and `no` |
+| Approval clicked, nothing runs after it | The execution went stale while it waited; the orchestrator resumes nothing | Finish it by hand (below), and approve the next one promptly |
 
+
+### Finishing a run whose approval gate went stale
+
+An approval that sits for hours may never resume, and the orchestrator's own
+API will not say so: a service account scoped to triggering the webhook reads
+empty lists from `/api/v1/workflows`, `/api/v1/executions` and
+`/api/v1/approvals` rather than an error. Give that account a read-only project
+role if you want to see inside; otherwise read the execution in the GUI.
+
+The two steps after the gate can be run by hand, because the build leaves
+everything they need behind. The build directory under
+`/var/tmp/ee-builds/<name>-<short sha>/` and the local image both survive, and
+the build job's `artifacts` carry the rest.
+
+1. Read `artifacts` from the **EE Build | Build Image** job: `ee_name`,
+   `ee_tag`, `ee_local_image`, `ee_definition_path`, `ee_definition_file`,
+   `ee_repo_url`, `ee_git_ref`.
+2. Read `artifacts` from the **EE Build | Apply AI Fix** job: `ee_ai_summary`,
+   `ee_ai_root_cause`, `ee_ai_category`.
+3. Launch **EE Build | Register EE** with the first three variables. It answers
+   with `ee_registered_image`.
+4. Launch **EE Build | Commit AI Fix** with the rest, plus
+   `ee_registered_image` and `ee_job_url` for the commit message.
+
+Run them in that order, so the commit message can cite the image that shipped.
+Both are safe if the orchestrator later wakes up and runs them itself: the
+register step re-pushes the same tags, and the commit step compares the file on
+the branch with what was built and reports `already_current` instead of writing
+a second commit.
 ---
 
 ## What was tested
@@ -430,9 +460,14 @@ AAP 2.7 (controller 4.8.8) with Event-Driven Ansible and private automation
 hub 4.12.2; automation orchestrator 2026.8 on MicroShift; automation portal
 2.7 (Backstage) on a RHEL appliance; RHEL 9 build host with podman 5.4 and
 ansible-builder 3.1.1; OpenAI as the LLM provider; a private GitHub definitions
-repository.
+repository, and a self-hosted GitLab CE 19.5 one on the build host itself.
 
 Exercised end to end: a portal-built EE from its pull request through to
 registration; a hand-pushed definition repaired twice by the agent and approved;
 rejection; the agent declining to retry; cleanup and its rerun; and a private
 repository with a token.
+
+The same chain was then run against GitLab: a hand-pushed definition with two
+separate faults, repaired twice by the agent, registered in the hub and the
+controller, and the fix committed back to GitLab with the loop marker, which
+the forward step correctly ignored on its way back round.
