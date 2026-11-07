@@ -1,0 +1,220 @@
+---
+# Install GitLab CE on the execution environment build host, tuned to sit idle
+# cheaply.
+#
+# Job template: "EE Build | Install GitLab"  (prompt on launch: extra variables)
+# Inventory:    the inventory holding the build host, limited to that host
+# Credentials:  a machine credential for the build host, with become
+#
+# Why this host and this configuration: the build chain needs a Git server
+# inside the network, because a webhook from a hosted forge cannot reach an
+# event stream published on a private address. The build host already has the
+# capacity, and GitLab is idle during the builds it triggers.
+#
+# The settings follow GitLab's memory-constrained guide, whose floor is 2 GB of
+# RAM plus 1 GB of swap for up to five developers. A stock install enables a
+# full monitoring stack this instance has no use for.
+#
+# Required variables
+#   gitlab_external_url   The URL GitLab serves on, for example
+#                         http://git.example.com. It is baked into clone URLs
+#                         and webhook payloads.
+#   gitlab_root_password  Initial password for the root account. Omit it to
+#                         have GitLab write one to
+#                         /etc/gitlab/initial_root_password instead.
+- name: Install GitLab CE tuned for a small, mostly idle instance
+  hosts: "{{ ee_build_host | default('ee-builder') }}"
+  become: true
+  gather_facts: true
+
+  vars:
+    gitlab_external_url: ""
+    gitlab_root_password: ""
+    gitlab_sidekiq_concurrency: 10
+    gitlab_log_rotate_keep: 7
+    # Free the dangling image layers left behind by previous builds. Tagged
+    # images are kept, so base images stay cached and the next build does not
+    # wait on a registry pull.
+    gitlab_reclaim_build_layers: true
+    # GitLab's guide asks for 20 GB available.
+    gitlab_required_free_mb: 20480
+    gitlab_open_firewall: true
+    gitlab_firewall_service: http
+    # The first reconfigure compiles a great deal, and this host has two cores.
+    gitlab_reconfigure_timeout: 2700
+
+  tasks:
+    - name: Check the required variables
+      ansible.builtin.assert:
+        that:
+          - gitlab_external_url | length > 0
+          - gitlab_external_url is match('^https?://')
+        fail_msg: >-
+          gitlab_external_url is required and must start with http:// or
+          https://. It is baked into clone URLs and webhook payloads, so set it
+          to the name the portal and Event-Driven Ansible will use.
+
+    - name: Confirm swap is configured
+      ansible.builtin.assert:
+        that: ansible_memory_mb.swap.total | int > 0
+        fail_msg: >-
+          GitLab's memory-constrained configuration expects swap. Configure
+          swap before installing.
+
+    # Build layers accumulate on a host whose job is building images. Dangling
+    # layers are reclaimed first, so the disk check below reflects reality.
+    - name: Reclaim space before installing
+      when: gitlab_reclaim_build_layers | bool
+      block:
+        - name: Look for a build in progress
+          ansible.builtin.shell:
+            cmd: >-
+              pgrep -f 'ansible-builder|podman .*build|buildah' >/dev/null
+              && echo busy || echo idle
+          register: _builder_state
+          changed_when: false
+          failed_when: false
+
+        - name: Say why the reclaim is being skipped
+          ansible.builtin.debug:
+            msg: >-
+              A build looks like it is running, so dangling layers are being
+              left alone. Rerun when the host is idle to reclaim them.
+          when: _builder_state.stdout | trim == 'busy'
+
+        - name: Remove dangling image layers, keeping tagged images
+          ansible.builtin.command:
+            cmd: podman image prune --force
+          register: _pruned
+          changed_when: _pruned.stdout | default('') | trim | length > 0
+          failed_when: false
+          when: _builder_state.stdout | trim != 'busy'
+
+    - name: Reread the disk now that layers are gone
+      ansible.builtin.setup:
+        gather_subset:
+          - "!all"
+          - hardware
+
+    - name: Confirm there is enough room
+      vars:
+        _root: "{{ ansible_mounts | selectattr('mount', 'equalto', '/') | first }}"
+      ansible.builtin.assert:
+        that: (_root.size_available | int) > (gitlab_required_free_mb | int * 1024 * 1024)
+        fail_msg: >-
+          Only {{ ((_root.size_available | int) / 1024 / 1024 / 1024) | round(1) }} GB
+          free on /, and GitLab's guide asks for
+          {{ (gitlab_required_free_mb | int / 1024) | round(1) }} GB. Grow the
+          disk or reclaim more space first.
+        success_msg: >-
+          {{ ((_root.size_available | int) / 1024 / 1024 / 1024) | round(1) }} GB
+          free on /.
+
+    - name: Install the packages GitLab's installer expects
+      ansible.builtin.dnf:
+        name:
+          - curl
+          - openssh-server
+          - perl
+          # So the installer can set SELinux contexts on the git user's keys.
+          - policycoreutils-python-utils
+        state: present
+
+    - name: Add the GitLab CE package repository
+      ansible.builtin.yum_repository:
+        name: gitlab_gitlab-ce
+        description: GitLab CE
+        baseurl: "https://packages.gitlab.com/gitlab/gitlab-ce/el/{{ ansible_distribution_major_version }}/$basearch"
+        gpgkey: https://packages.gitlab.com/gitlab/gitlab-ce/gpgkey
+        gpgcheck: true
+        repo_gpgcheck: false
+        sslverify: true
+        enabled: true
+
+    - name: Create the configuration directory
+      ansible.builtin.file:
+        path: /etc/gitlab
+        state: directory
+        mode: "0755"
+
+    # The configuration is written before the package is installed, and the
+    # package's own reconfigure is suppressed, so the first and only
+    # reconfigure runs with these settings. Otherwise it compiles once with the
+    # defaults, which on two cores is half an hour spent twice.
+    - name: Write the tuned configuration
+      ansible.builtin.template:
+        src: templates/gitlab.rb.j2
+        dest: /etc/gitlab/gitlab.rb
+        mode: "0600"
+        backup: true
+      no_log: "{{ gitlab_root_password | length > 0 }}"
+      register: _config
+
+    - name: Install GitLab CE without letting it reconfigure itself
+      ansible.builtin.dnf:
+        name: gitlab-ce
+        state: present
+      environment:
+        GITLAB_SKIP_AUTO_RECONFIGURE: "true"
+      register: _installed
+
+    - name: Apply the configuration
+      ansible.builtin.command:
+        cmd: gitlab-ctl reconfigure
+      register: _reconfigure
+      changed_when: true
+      when: _installed is changed or _config is changed
+      timeout: "{{ gitlab_reconfigure_timeout | int }}"
+
+    - name: Open the firewall
+      ansible.posix.firewalld:
+        service: "{{ gitlab_firewall_service }}"
+        permanent: true
+        immediate: true
+        state: enabled
+      when: gitlab_open_firewall | bool
+
+    - name: Wait for GitLab to answer
+      ansible.builtin.uri:
+        url: http://127.0.0.1/-/readiness
+        headers:
+          Host: "{{ gitlab_external_url | regex_replace('^https?://', '') | regex_replace('/.*$', '') }}"
+        status_code: [200, 503]
+        validate_certs: false
+      register: _ready
+      until: _ready.status == 200
+      retries: 40
+      delay: 15
+      changed_when: false
+
+    - name: Read what it is actually using
+      ansible.builtin.shell:
+        cmd: |
+          echo "--- services"
+          gitlab-ctl status 2>&1 | sed 's/^/  /'
+          echo "--- memory"
+          free -m | sed 's/^/  /'
+          echo "--- disk"
+          df -h / | sed 's/^/  /'
+          echo "--- resident set across GitLab processes"
+          ps -eo rss,comm --no-headers | awk '$2 ~ /puma|sidekiq|gitaly|postgres|redis|nginx|workhorse|logrotate|gitlab/ {s+=$1} END {printf "  %.0f MB\n", s/1024}'
+        executable: /bin/bash
+      register: _state
+      changed_when: false
+
+    - name: Show it
+      ansible.builtin.debug:
+        msg: "{{ _state.stdout_lines }}"
+
+    - name: Say what to do next
+      ansible.builtin.debug:
+        msg:
+          - "GitLab is answering at {{ gitlab_external_url }}."
+          - >-
+            Sign in as root
+            {{ 'with the password supplied to this job.'
+               if gitlab_root_password | length > 0
+               else 'with the password in /etc/gitlab/initial_root_password, which is valid for 24 hours.' }}
+          - >-
+            The name in gitlab_external_url has to resolve before the portal and
+            Event-Driven Ansible can reach it.

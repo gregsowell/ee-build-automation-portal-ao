@@ -1,0 +1,100 @@
+# {{ ansible_managed }}
+#
+# GitLab CE tuned for a memory-constrained host, following GitLab's own guide
+# at docs.gitlab.com/omnibus/settings/memory_constrained_envs/. That guide is
+# scoped to "up to 5 developers with individual Git repositories no larger than
+# 100 MB", which is what this instance is for: holding execution environment
+# definitions and firing a webhook when one changes.
+#
+# Do not edit by hand. Change the variables in install_gitlab.yml and rerun it.
+
+external_url '{{ gitlab_external_url }}'
+
+## --- Memory ----------------------------------------------------------------
+
+# One Puma process instead of a cluster. GitLab's guide puts the saving at
+# 100-400 MB.
+puma['worker_processes'] = 0
+puma['exporter_enabled'] = false
+
+# Default is 20. Nothing here queues background work in bulk.
+sidekiq['concurrency'] = {{ gitlab_sidekiq_concurrency }}
+sidekiq['metrics_enabled'] = false
+
+# Cap how much work a single repository can ask Gitaly to do at once, and how
+# many git processes it will spawn in parallel.
+gitaly['configuration'] = {
+  concurrency: [
+    { rpc: '/gitaly.SmartHTTPService/PostReceivePack', max_per_repo: 3 },
+    { rpc: '/gitaly.SSHService/SSHUploadPack', max_per_repo: 3 },
+  ],
+}
+gitaly['env'] = {
+  'GITALY_COMMAND_SPAWN_MAX_PARALLEL' => '2',
+  'MALLOC_CONF' => 'dirty_decay_ms:1000,muzzy_decay_ms:1000',
+}
+
+# Return freed pages to the OS sooner, rather than holding them in the
+# allocator's caches.
+gitlab_rails['env'] = {
+  'MALLOC_CONF' => 'dirty_decay_ms:1000,muzzy_decay_ms:1000',
+}
+
+## --- The monitoring stack, off ----------------------------------------------
+#
+# GitLab "enables all services by default to provide a complete DevOps solution
+# without any additional configuration". None of this is used here, and turning
+# it off is worth about 300 MB by GitLab's own figure.
+
+prometheus_monitoring['enable'] = false
+prometheus['enable'] = false
+alertmanager['enable'] = false
+node_exporter['enable'] = false
+postgres_exporter['enable'] = false
+redis_exporter['enable'] = false
+gitlab_exporter['enable'] = false
+
+# Kubernetes agent server. There is no cluster to agent for.
+gitlab_kas['enable'] = false
+
+## --- Components this instance does not need ---------------------------------
+
+# Images live in private automation hub, not here.
+registry['enable'] = false
+gitlab_rails['gitlab_default_projects_features_container_registry'] = false
+
+gitlab_pages['enable'] = false
+mattermost['enable'] = false
+
+# No CI on this instance: the build runs in automation orchestrator. New
+# projects start with pipelines off, which also keeps Sidekiq idle.
+gitlab_rails['gitlab_default_projects_features_builds'] = false
+
+gitlab_rails['usage_ping_enabled'] = false
+
+## --- Disk -------------------------------------------------------------------
+#
+# This host also builds container images, so GitLab's logs are kept short.
+
+logging['logrotate_frequency'] = 'daily'
+logging['logrotate_rotate'] = {{ gitlab_log_rotate_keep }}
+logging['logrotate_compress'] = 'compress'
+logging['logrotate_dateformat'] = '-%Y-%m-%d'
+
+# Housekeeping runs against few, tiny repositories; the defaults are generous
+# for that.
+gitlab_rails['gitlab_default_projects_features_wiki'] = false
+gitlab_rails['gitlab_default_projects_features_snippets'] = false
+
+## --- Mail -------------------------------------------------------------------
+#
+# Nothing here sends mail. Left explicitly off so GitLab does not queue
+# deliveries that can never succeed.
+gitlab_rails['smtp_enable'] = false
+gitlab_rails['gitlab_email_enabled'] = false
+
+## --- First boot -------------------------------------------------------------
+{% if gitlab_root_password | default('', true) | length > 0 %}
+gitlab_rails['initial_root_password'] = {{ gitlab_root_password | to_json }}
+{% endif %}
+gitlab_rails['store_initial_root_password'] = false
