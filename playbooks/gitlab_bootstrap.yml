@@ -51,6 +51,8 @@
     # extra variable.
     aap_url: "{{ lookup('ansible.builtin.env', 'CONTROLLER_HOST') }}"
     aap_token: "{{ lookup('ansible.builtin.env', 'CONTROLLER_OAUTH_TOKEN') }}"
+    aap_username: "{{ lookup('ansible.builtin.env', 'CONTROLLER_USERNAME') }}"
+    aap_password: "{{ lookup('ansible.builtin.env', 'CONTROLLER_PASSWORD') }}"
     aap_validate_certs: false
     aap_organization: Default
     gitlab_aap_credential_name: EE Definitions GitLab Token
@@ -62,17 +64,26 @@
         that:
           - gitlab_external_url | length > 0
           - aap_url | length > 0
-          - aap_token | length > 0
+          - (aap_token | length > 0) or (aap_username | length > 0 and aap_password | length > 0)
         fail_msg: >-
           gitlab_external_url is required, and the job template needs an
           Ansible Automation Platform credential so the token can be stored.
 
     # CONTROLLER_HOST is injected without a scheme.
-    - name: Normalize the controller URL
+    # The credential injects either a token or a username and password, so
+    # both are supported, the same way ee_register.yml does it.
+    - name: Work out how to talk to the controller
       ansible.builtin.set_fact:
         _aap: >-
           {{ (aap_url if aap_url is match('https?://') else 'https://' ~ aap_url)
              | regex_replace('/$', '') }}
+        _aap_headers: >-
+          {{ {'Authorization': 'Bearer ' ~ aap_token}
+             if aap_token | length > 0 else {} }}
+        _aap_user: "{{ omit if aap_token | length > 0 else aap_username }}"
+        _aap_pass: "{{ omit if aap_token | length > 0 else aap_password }}"
+        _aap_basic: "{{ aap_token | length == 0 }}"
+      no_log: true
 
     - name: Confirm GitLab is installed
       ansible.builtin.command:
@@ -268,8 +279,10 @@
             url: >-
               {{ _aap }}/api/controller/v2/credential_types/?name={{
                  gitlab_aap_credential_type | urlencode }}
-            headers:
-              Authorization: "Bearer {{ aap_token }}"
+            headers: "{{ _aap_headers }}"
+            url_username: "{{ _aap_user }}"
+            url_password: "{{ _aap_pass }}"
+            force_basic_auth: "{{ _aap_basic }}"
             validate_certs: "{{ aap_validate_certs }}"
             status_code: [200]
           register: _cred_type
@@ -289,8 +302,10 @@
             url: >-
               {{ _aap }}/api/controller/v2/organizations/?name={{
                  aap_organization | urlencode }}
-            headers:
-              Authorization: "Bearer {{ aap_token }}"
+            headers: "{{ _aap_headers }}"
+            url_username: "{{ _aap_user }}"
+            url_password: "{{ _aap_pass }}"
+            force_basic_auth: "{{ _aap_basic }}"
             validate_certs: "{{ aap_validate_certs }}"
             status_code: [200]
           register: _org
@@ -302,8 +317,10 @@
             url: >-
               {{ _aap }}/api/controller/v2/credentials/?name={{
                  gitlab_aap_credential_name | urlencode }}
-            headers:
-              Authorization: "Bearer {{ aap_token }}"
+            headers: "{{ _aap_headers }}"
+            url_username: "{{ _aap_user }}"
+            url_password: "{{ _aap_pass }}"
+            force_basic_auth: "{{ _aap_basic }}"
             validate_certs: "{{ aap_validate_certs }}"
             status_code: [200]
           register: _cred
@@ -314,8 +331,11 @@
           ansible.builtin.uri:
             url: "{{ _aap }}/api/controller/v2/credentials/"
             method: POST
-            headers:
-              Authorization: "Bearer {{ aap_token }}"
+            headers: "{{ _aap_headers }}"
+            url_username: "{{ _aap_user }}"
+            url_password: "{{ _aap_pass }}"
+            force_basic_auth: "{{ _aap_basic }}"
+            validate_certs: "{{ aap_validate_certs }}"
             body_format: json
             body:
               name: "{{ gitlab_aap_credential_name }}"
@@ -334,8 +354,11 @@
               {{ _aap }}/api/controller/v2/credentials/{{
                  (_cred.json.results | first).id }}/
             method: PATCH
-            headers:
-              Authorization: "Bearer {{ aap_token }}"
+            headers: "{{ _aap_headers }}"
+            url_username: "{{ _aap_user }}"
+            url_password: "{{ _aap_pass }}"
+            force_basic_auth: "{{ _aap_basic }}"
+            validate_certs: "{{ aap_validate_certs }}"
             body_format: json
             body:
               inputs:
