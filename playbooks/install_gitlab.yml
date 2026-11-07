@@ -40,6 +40,12 @@
     gitlab_required_free_mb: 20480
     gitlab_open_firewall: true
     gitlab_firewall_service: http
+    # GitLab's repository key, then the key its packages are signed with
+    # ("GitLab, Inc. <support@gitlab.com>"). Both are needed: the first lets
+    # dnf trust the repository, the second lets it verify the rpm.
+    gitlab_gpg_keys:
+      - https://packages.gitlab.com/gitlab/gitlab-ce/gpgkey
+      - https://packages.gitlab.com/gitlab/gitlab-ce/gpgkey/gitlab-gitlab-ce-3D645A26AB9FBD22.pub.gpg
     # The first reconfigure compiles a great deal, and this host has two cores.
     gitlab_reconfigure_timeout: 2700
 
@@ -149,12 +155,22 @@
           - policycoreutils-python-utils
         state: present
 
+    # dnf will not import a signing key unattended, so the packages fail
+    # verification unless the keys are in the rpm keyring first. Two are
+    # needed: GitLab's repository key, and the key the packages themselves are
+    # signed with.
+    - name: Import GitLab's signing keys
+      ansible.builtin.rpm_key:
+        key: "{{ item }}"
+        state: present
+      loop: "{{ gitlab_gpg_keys }}"
+
     - name: Add the GitLab CE package repository
       ansible.builtin.yum_repository:
         name: gitlab_gitlab-ce
         description: GitLab CE
         baseurl: "https://packages.gitlab.com/gitlab/gitlab-ce/el/{{ ansible_distribution_major_version }}/$basearch"
-        gpgkey: https://packages.gitlab.com/gitlab/gitlab-ce/gpgkey
+        gpgkey: "{{ gitlab_gpg_keys | join('\n       ') }}"
         gpgcheck: true
         repo_gpgcheck: false
         sslverify: true
