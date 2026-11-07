@@ -1,0 +1,357 @@
+---
+# Prepare the in-lab GitLab to drive the execution environment build chain:
+# a project to hold definitions, an automation token, and a push webhook
+# pointing at the Event-Driven Ansible event stream.
+#
+# Job template: "EE Build | Bootstrap GitLab"  (prompt on launch: extra variables)
+# Inventory:    the inventory holding the GitLab host, limited to that host
+# Credentials:  a machine credential for that host, with become
+#
+# The access token is created on the host with gitlab-rails, and written
+# straight into an automation controller credential over the API. It is never
+# printed, so it does not land in a job's event records.
+#
+# Everything other than the token is done through GitLab's REST API rather
+# than Rails internals, because the API is versioned and the internals are not.
+#
+# Required variables
+#   gitlab_external_url   Where GitLab answers, e.g. http://git.example.com
+#   aap_url, aap_token    So the token can be stored as a credential
+# Optional
+#   gitlab_webhook_url    The EDA event stream URL. Without it, no webhook is
+#                         created, which is the right order on a first run:
+#                         create the event stream first, then rerun with this.
+#   gitlab_webhook_token  Shared secret sent as X-Gitlab-Token.
+- name: Prepare GitLab for the build chain
+  hosts: "{{ gitlab_host | default('ee-builder') }}"
+  become: true
+  gather_facts: false
+
+  vars:
+    gitlab_external_url: ""
+    gitlab_group: automation
+    gitlab_project: ee-definitions
+    gitlab_project_description: Execution environment definitions, built by automation orchestrator
+    gitlab_default_branch: main
+    gitlab_token_name: ee-build-automation
+    gitlab_token_scopes: "api,write_repository"
+    gitlab_token_days: 364
+    # Each run issues a fresh token and revokes the previous one of the same
+    # name, then updates the controller credential in the same run, so the two
+    # never drift apart.
+    gitlab_rotate_token: true
+    gitlab_webhook_url: ""
+    gitlab_webhook_token: ""
+    # Event streams are usually published with a certificate the lab does not
+    # chain to a public root.
+    gitlab_webhook_verify_ssl: false
+    # Where to store the token for the build job templates. These come from an
+    # "Ansible Automation Platform" credential on the job template, the same
+    # way ee_register.yml gets them, so no controller token is passed as an
+    # extra variable.
+    aap_url: "{{ lookup('ansible.builtin.env', 'CONTROLLER_HOST') }}"
+    aap_token: "{{ lookup('ansible.builtin.env', 'CONTROLLER_OAUTH_TOKEN') }}"
+    aap_validate_certs: false
+    aap_organization: Default
+    gitlab_aap_credential_name: EE Definitions GitLab Token
+    gitlab_aap_credential_type: EE Definitions Git Token
+
+  tasks:
+    - name: Check the required variables
+      ansible.builtin.assert:
+        that:
+          - gitlab_external_url | length > 0
+          - aap_url | length > 0
+          - aap_token | length > 0
+        fail_msg: >-
+          gitlab_external_url is required, and the job template needs an
+          Ansible Automation Platform credential so the token can be stored.
+
+    # CONTROLLER_HOST is injected without a scheme.
+    - name: Normalize the controller URL
+      ansible.builtin.set_fact:
+        _aap: >-
+          {{ (aap_url if aap_url is match('https?://') else 'https://' ~ aap_url)
+             | regex_replace('/$', '') }}
+
+    - name: Confirm GitLab is installed
+      ansible.builtin.command:
+        cmd: gitlab-ctl status
+      register: _ctl
+      changed_when: false
+      failed_when: _ctl.rc not in [0, 3]
+
+    # Only this one step uses Rails internals: there is no API for minting the
+    # first token, because every API call needs one.
+    - name: Issue an automation access token
+      ansible.builtin.command:
+        cmd: gitlab-rails runner -
+        stdin: |
+          user = User.find_by_username('root')
+          raise 'no root user' if user.nil?
+          name = {{ gitlab_token_name | to_json }}
+          user.personal_access_tokens.active.where(name: name).each(&:revoke!)
+          token = user.personal_access_tokens.create!(
+            name: name,
+            scopes: {{ gitlab_token_scopes.split(',') | to_json }},
+            expires_at: {{ gitlab_token_days | int }}.days.from_now,
+          )
+          raise token.errors.full_messages.join(', ') unless token.persisted?
+          print token.token
+      register: _token
+      changed_when: true
+      no_log: true
+      when: gitlab_rotate_token | bool
+
+    - name: Keep the token for the rest of this play only
+      ansible.builtin.set_fact:
+        _pat: "{{ _token.stdout | trim }}"
+      no_log: true
+      when: gitlab_rotate_token | bool
+
+    - name: Confirm the token works
+      ansible.builtin.uri:
+        url: "{{ gitlab_external_url }}/api/v4/version"
+        headers:
+          PRIVATE-TOKEN: "{{ _pat }}"
+        status_code: [200]
+      register: _version
+      no_log: true
+      changed_when: false
+
+    - name: Say which GitLab this is
+      ansible.builtin.debug:
+        msg: "GitLab {{ _version.json.version }} ({{ _version.json.revision }})"
+
+    - name: Look for the group
+      ansible.builtin.uri:
+        url: "{{ gitlab_external_url }}/api/v4/groups/{{ gitlab_group | urlencode }}"
+        headers:
+          PRIVATE-TOKEN: "{{ _pat }}"
+        status_code: [200, 404]
+      register: _group_check
+      no_log: true
+      changed_when: false
+
+    - name: Create the group
+      ansible.builtin.uri:
+        url: "{{ gitlab_external_url }}/api/v4/groups"
+        method: POST
+        headers:
+          PRIVATE-TOKEN: "{{ _pat }}"
+        body_format: json
+        body:
+          name: "{{ gitlab_group }}"
+          path: "{{ gitlab_group }}"
+          visibility: private
+        status_code: [201]
+      register: _group_new
+      no_log: true
+      when: _group_check.status == 404
+
+    - name: Note the group id
+      ansible.builtin.set_fact:
+        _group_id: >-
+          {{ (_group_new.json.id if _group_check.status == 404 else _group_check.json.id) | int }}
+
+    - name: Look for the project
+      ansible.builtin.uri:
+        url: >-
+          {{ gitlab_external_url }}/api/v4/projects/{{
+             (gitlab_group ~ '/' ~ gitlab_project) | urlencode | regex_replace('/', '%2F') }}
+        headers:
+          PRIVATE-TOKEN: "{{ _pat }}"
+        status_code: [200, 404]
+      register: _project_check
+      no_log: true
+      changed_when: false
+
+    - name: Create the project
+      ansible.builtin.uri:
+        url: "{{ gitlab_external_url }}/api/v4/projects"
+        method: POST
+        headers:
+          PRIVATE-TOKEN: "{{ _pat }}"
+        body_format: json
+        body:
+          name: "{{ gitlab_project }}"
+          path: "{{ gitlab_project }}"
+          namespace_id: "{{ _group_id | int }}"
+          description: "{{ gitlab_project_description }}"
+          default_branch: "{{ gitlab_default_branch }}"
+          visibility: private
+          initialize_with_readme: true
+          # Nothing here runs pipelines; the build is in automation
+          # orchestrator. Off by default keeps Sidekiq idle.
+          jobs_enabled: false
+          wiki_enabled: false
+          snippets_enabled: false
+          container_registry_enabled: false
+        status_code: [201]
+      register: _project_new
+      no_log: true
+      when: _project_check.status == 404
+
+    - name: Note the project
+      ansible.builtin.set_fact:
+        _project: >-
+          {{ _project_new.json if _project_check.status == 404 else _project_check.json }}
+      no_log: true
+
+    - name: Say what the project is
+      ansible.builtin.debug:
+        msg:
+          - "Project: {{ _project.path_with_namespace }} (id {{ _project.id }})"
+          - "Clone over https: {{ _project.http_url_to_repo }}"
+          - "Default branch: {{ _project.default_branch | default(gitlab_default_branch) }}"
+
+    - name: Set up the push webhook
+      when: gitlab_webhook_url | length > 0
+      block:
+        - name: Look for an existing webhook
+          ansible.builtin.uri:
+            url: "{{ gitlab_external_url }}/api/v4/projects/{{ _project.id }}/hooks"
+            headers:
+              PRIVATE-TOKEN: "{{ _pat }}"
+            status_code: [200]
+          register: _hooks
+          no_log: true
+          changed_when: false
+
+        - name: Work out whether one already points at the event stream
+          ansible.builtin.set_fact:
+            _hook_id: >-
+              {{ (_hooks.json | selectattr('url', 'equalto', gitlab_webhook_url)
+                  | map(attribute='id') | list | first) | default('', true) }}
+
+        - name: Create the webhook
+          ansible.builtin.uri:
+            url: "{{ gitlab_external_url }}/api/v4/projects/{{ _project.id }}/hooks"
+            method: POST
+            headers:
+              PRIVATE-TOKEN: "{{ _pat }}"
+            body_format: json
+            body:
+              url: "{{ gitlab_webhook_url }}"
+              token: "{{ gitlab_webhook_token }}"
+              push_events: true
+              merge_requests_events: false
+              tag_push_events: false
+              enable_ssl_verification: "{{ gitlab_webhook_verify_ssl | bool }}"
+            status_code: [201]
+          no_log: true
+          when: _hook_id | length == 0
+
+        - name: Update the webhook
+          ansible.builtin.uri:
+            url: "{{ gitlab_external_url }}/api/v4/projects/{{ _project.id }}/hooks/{{ _hook_id }}"
+            method: PUT
+            headers:
+              PRIVATE-TOKEN: "{{ _pat }}"
+            body_format: json
+            body:
+              url: "{{ gitlab_webhook_url }}"
+              token: "{{ gitlab_webhook_token }}"
+              push_events: true
+              enable_ssl_verification: "{{ gitlab_webhook_verify_ssl | bool }}"
+            status_code: [200]
+          no_log: true
+          when: _hook_id | length > 0
+
+    # The token goes straight into a controller credential, so the only place
+    # it is written down is somewhere already built to hold secrets.
+    - name: Store the token in automation controller
+      when: gitlab_rotate_token | bool
+      block:
+        - name: Find the credential type
+          ansible.builtin.uri:
+            url: >-
+              {{ _aap }}/api/controller/v2/credential_types/?name={{
+                 gitlab_aap_credential_type | urlencode }}
+            headers:
+              Authorization: "Bearer {{ aap_token }}"
+            validate_certs: "{{ aap_validate_certs }}"
+            status_code: [200]
+          register: _cred_type
+          no_log: true
+          changed_when: false
+
+        - name: Insist the credential type exists
+          ansible.builtin.assert:
+            that: _cred_type.json.count | int > 0
+            fail_msg: >-
+              The credential type "{{ gitlab_aap_credential_type }}" does not
+              exist. Run setup/configure_aap.yml first; it creates the type
+              that injects ee_git_token.
+
+        - name: Find the organization
+          ansible.builtin.uri:
+            url: >-
+              {{ _aap }}/api/controller/v2/organizations/?name={{
+                 aap_organization | urlencode }}
+            headers:
+              Authorization: "Bearer {{ aap_token }}"
+            validate_certs: "{{ aap_validate_certs }}"
+            status_code: [200]
+          register: _org
+          no_log: true
+          changed_when: false
+
+        - name: Look for the credential
+          ansible.builtin.uri:
+            url: >-
+              {{ _aap }}/api/controller/v2/credentials/?name={{
+                 gitlab_aap_credential_name | urlencode }}
+            headers:
+              Authorization: "Bearer {{ aap_token }}"
+            validate_certs: "{{ aap_validate_certs }}"
+            status_code: [200]
+          register: _cred
+          no_log: true
+          changed_when: false
+
+        - name: Create the credential
+          ansible.builtin.uri:
+            url: "{{ _aap }}/api/controller/v2/credentials/"
+            method: POST
+            headers:
+              Authorization: "Bearer {{ aap_token }}"
+            body_format: json
+            body:
+              name: "{{ gitlab_aap_credential_name }}"
+              description: Access token for the in-lab GitLab, issued by gitlab_bootstrap.yml
+              credential_type: "{{ (_cred_type.json.results | first).id | int }}"
+              organization: "{{ (_org.json.results | first).id | int }}"
+              inputs:
+                ee_git_token: "{{ _pat }}"
+            status_code: [201]
+          no_log: true
+          when: _cred.json.count | int == 0
+
+        - name: Update the credential with the new token
+          ansible.builtin.uri:
+            url: >-
+              {{ _aap }}/api/controller/v2/credentials/{{
+                 (_cred.json.results | first).id }}/
+            method: PATCH
+            headers:
+              Authorization: "Bearer {{ aap_token }}"
+            body_format: json
+            body:
+              inputs:
+                ee_git_token: "{{ _pat }}"
+            status_code: [200]
+          no_log: true
+          when: _cred.json.count | int > 0
+
+    - name: Say what to do next
+      ansible.builtin.debug:
+        msg:
+          - >-
+            Token stored in the controller credential
+            "{{ gitlab_aap_credential_name }}". It was not printed anywhere.
+          - >-
+            {{ ('Webhook points at ' ~ gitlab_webhook_url)
+               if gitlab_webhook_url | length > 0
+               else 'No webhook yet: create the event stream, then rerun with gitlab_webhook_url and gitlab_webhook_token.' }}
+          - "Clone URL for the build chain: {{ _project.http_url_to_repo }}"
