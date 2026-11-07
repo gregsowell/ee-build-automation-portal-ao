@@ -96,5 +96,10 @@ gitlab_rails['gitlab_email_enabled'] = false
 ## --- First boot -------------------------------------------------------------
 {% if gitlab_root_password | default('', true) | length > 0 %}
 gitlab_rails['initial_root_password'] = {{ gitlab_root_password | to_json }}
-{% endif %}
 gitlab_rails['store_initial_root_password'] = false
+{% else %}
+# No password was supplied, so GitLab generates one and writes it to
+# /etc/gitlab/initial_root_password, where it is readable for 24 hours. That
+# keeps the password off the wire and out of the automation's job records.
+gitlab_rails['store_initial_root_password'] = true
+{% endif %}
