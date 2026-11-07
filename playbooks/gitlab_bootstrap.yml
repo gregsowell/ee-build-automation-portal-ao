@@ -288,6 +288,22 @@
             status_code: [200]
           no_log: true
 
+        # GitLab refuses webhooks aimed at the local network unless told
+        # otherwise, and an in-lab event stream is exactly that. Without this
+        # the hook cannot be created at all: "Url is blocked: Requests to the
+        # local network are not allowed".
+        - name: Allow webhooks to reach the local network
+          ansible.builtin.uri:
+            url: "{{ gitlab_external_url }}/api/v4/application/settings"
+            method: PUT
+            headers:
+              PRIVATE-TOKEN: "{{ _pat }}"
+            body_format: json
+            body:
+              allow_local_requests_from_web_hooks_and_services: true
+            status_code: [200]
+          no_log: true
+
         - name: Look for an existing webhook
           ansible.builtin.uri:
             url: "{{ gitlab_external_url }}/api/v4/projects/{{ _project.id }}/hooks"
@@ -320,6 +336,8 @@
               enable_ssl_verification: "{{ gitlab_webhook_verify_ssl | bool }}"
             status_code: [201]
           no_log: true
+          failed_when: false
+          register: _hook_created
           when: _hook_id | length == 0
 
         - name: Update the webhook
@@ -336,7 +354,22 @@
               enable_ssl_verification: "{{ gitlab_webhook_verify_ssl | bool }}"
             status_code: [200]
           no_log: true
+          failed_when: false
+          register: _hook_updated
           when: _hook_id | length > 0
+
+        - name: Confirm the webhook took
+          vars:
+            _r: >-
+              {{ _hook_created if _hook_id | length == 0 else _hook_updated }}
+          ansible.builtin.assert:
+            that: _r.status | int in [200, 201]
+            fail_msg: >-
+              GitLab refused the webhook ({{ _r.status | default('no response') }}):
+              {{ _r.json.message | default(_r.json | default('no detail')) }}
+            success_msg: >-
+              Webhook {{ 'created' if _hook_id | length == 0 else 'updated' }},
+              pointing at the event stream.
 
     # The token goes straight into a controller credential, so the only place
     # it is written down is somewhere already built to hold secrets.
