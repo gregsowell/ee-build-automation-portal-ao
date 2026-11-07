@@ -421,16 +421,31 @@ healthy and the only fault was reachability.
 | Builder refuses to save: missing a connection from `Then` | The API allows a dangling branch, the builder does not | Put the used outcome on `Then` and invert the test |
 | Loop exits immediately, or never | `do_while` is evaluated **after** the body | Write the condition against the body's own output |
 | Condition errors on `true`/`false` | Bare booleans are read as step names | Compare strings: the agent answers `yes` and `no` |
-| Approval clicked, nothing runs after it | The execution went stale while it waited; the orchestrator resumes nothing | Finish it by hand (below), and approve the next one promptly |
+| Approval clicked, nothing runs after it | The approval expired four hours after the gate opened and failed the run; approving later does nothing | Raise the approval node's timeout, and finish the stranded run by hand (below) |
 
 
-### Finishing a run whose approval gate went stale
+### Approvals expire, and the run dies quietly
 
-An approval that sits for hours may never resume, and the orchestrator's own
-API will not say so: a service account scoped to triggering the webhook reads
-empty lists from `/api/v1/workflows`, `/api/v1/executions` and
-`/api/v1/approvals` rather than an error. Give that account a read-only project
-role if you want to see inside; otherwise read the execution in the GUI.
+An approval node does not wait indefinitely. In one measured run the gate opened
+at 00:06:45 and the execution was marked **Failed** at 04:06:45 — four hours
+later, to the second. Approving after that does nothing at all: there is no
+error in the GUI, no notification, and nothing on the rejection path runs. The
+run simply sits in the list as failed, and the image it built is never
+published.
+
+Check the timeout on the approval node before relying on this chain
+unattended. Four hours is short for anything that needs a human who was not
+already waiting for it, and the expiry is silent, so a demo left running
+overnight is dead by morning with nothing to say so.
+
+The orchestrator's own API will not help you find this: a service account
+scoped to triggering the webhook reads empty lists from `/api/v1/workflows`,
+`/api/v1/executions` and `/api/v1/approvals` rather than an error, which reads
+as "nothing pending". Give that account a read-only project role if you want to
+see inside; otherwise read the execution in the GUI, where the created and
+completed timestamps tell you whether it expired.
+
+#### Finishing a stranded run by hand
 
 The two steps after the gate can be run by hand, because the build leaves
 everything they need behind. The build directory under
