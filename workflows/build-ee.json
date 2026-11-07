@@ -257,7 +257,7 @@
       "parameters": {
         "prompt": "An AI agent modified the execution environment definition for ${build_ee.artifacts.ee_name} and the build then succeeded.\n\nWhat it changed: ${apply_ai_fix.artifacts.ee_ai_summary}\nRoot cause: ${apply_ai_fix.artifacts.ee_ai_root_cause}\n\nThe definition that was built:\n${build_ee.artifacts.ee_definition}\n\nApprove to push this image to private automation hub and register it in Ansible Automation Platform.",
         "fallback_decision": "reject",
-        "decision_window": 14400,
+        "decision_window": 604800,
         "approver_users": [
           "admin"
         ]

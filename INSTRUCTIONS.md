@@ -326,6 +326,7 @@ starts.
 | Repair | Push one with a misspelled collection | Fails, agent corrects it, rebuilds, waits for approval |
 | Approval | Approve it | Registers, and commits the fix back (Phase 12) |
 | Rejection | Reject one | `notify_rejected` runs, nothing is published |
+| Expiry | Let one sit past `decision_window` | Run **fails**; `notify_rejected` does **not** run, nothing is published |
 | Agent declines | Break it in a way the agent will not retry, such as an unreachable registry | `notify_no_retry`, loop does not burn attempts |
 | Give up | Break it unfixably | Loop stops at `max_iterations`, `notify_failure` |
 | Cleanup | Run **EE Build \| Remove EE** | Gone from controller, hub and the build host |
@@ -421,29 +422,47 @@ healthy and the only fault was reachability.
 | Builder refuses to save: missing a connection from `Then` | The API allows a dangling branch, the builder does not | Put the used outcome on `Then` and invert the test |
 | Loop exits immediately, or never | `do_while` is evaluated **after** the body | Write the condition against the body's own output |
 | Condition errors on `true`/`false` | Bare booleans are read as step names | Compare strings: the agent answers `yes` and `no` |
-| Approval clicked, nothing runs after it | The approval expired four hours after the gate opened and failed the run; approving later does nothing | Raise the approval node's timeout, and finish the stranded run by hand (below) |
+| Approval clicked, nothing runs after it | The approval's `decision_window` elapsed, which fails the run; approving later does nothing | Raise `decision_window` on the approval node, and finish the stranded run by hand (below) |
 
 
 ### Approvals expire, and the run dies quietly
 
-An approval node does not wait indefinitely. In one measured run the gate opened
-at 00:06:45 and the execution was marked **Failed** at 04:06:45 — four hours
-later, to the second. Approving after that does nothing at all: there is no
-error in the GUI, no notification, and nothing on the rejection path runs. The
-run simply sits in the list as failed, and the image it built is never
-published.
+The approval node's `decision_window` is how long it will wait, in seconds.
+When it elapses, the run **fails**. Approving afterwards does nothing: there is
+no error in the GUI, no notification, and the image that was built and waiting
+is never published.
 
-Check the timeout on the approval node before relying on this chain
-unattended. Four hours is short for anything that needs a human who was not
-already waiting for it, and the expiry is silent, so a demo left running
-overnight is dead by morning with nothing to say so.
+Two things about this are worth knowing before you trust it unattended.
 
-The orchestrator's own API will not help you find this: a service account
-scoped to triggering the webhook reads empty lists from `/api/v1/workflows`,
-`/api/v1/executions` and `/api/v1/approvals` rather than an error, which reads
-as "nothing pending". Give that account a read-only project role if you want to
-see inside; otherwise read the execution in the GUI, where the created and
-completed timestamps tell you whether it expired.
+**`fallback_decision` does not route.** The node carries
+`"fallback_decision": "reject"`, and its stored record names
+`notify_rejected` as the step for a rejection — but an expiry does not take
+that edge. The execution simply fails, and nothing on the rejected path runs.
+Set a window long enough that the fallback never has to be used.
+
+**The error names the wrong setting.** An expired run reports `The step
+"Human Approval" did not finish within 30 seconds (configured in the node
+Timeout setting)`. There is no 30-second timeout involved; the number is
+wrong and so is the setting it points at. The field to change is
+`decision_window` on the approval node.
+
+Read the approval record itself rather than the error, through
+`/api/v1/approvals?limit=20`. An expired one says so plainly:
+
+```
+status:         expired
+created_at:     2026-11-07T06:06:35Z
+timeout_at:     2026-11-07T10:06:35Z
+decision_notes: Approval decision window expired
+decided_by:     worker.ao.svc  (a service, not a person)
+```
+
+That endpoint needs an account that can read the project. The service account
+the chain runs as cannot: scoped to triggering the webhook, it reads **empty
+lists** from `/api/v1/workflows`, `/api/v1/executions` and `/api/v1/approvals`
+rather than an error, which looks exactly like "nothing pending". Log in as the
+admin from `ao_password`, the same way `setup/configure_ao.yml` does, or give
+the service account a read-only project role.
 
 #### Finishing a stranded run by hand
 
