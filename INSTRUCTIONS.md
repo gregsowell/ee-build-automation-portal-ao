@@ -342,11 +342,53 @@ Everything here was hit during the original build.
 | Symptom | Cause | Fix |
 |---|---|---|
 | GitHub reports 200, stream counts the event, nothing runs | Event stream in test mode | Turn test mode off |
+| Portal merged the pull request, stream count never moved | GitHub cannot reach the event stream URL | See *Checking that GitHub can reach the event stream* below |
 | Event stream logs "Signature mismatch" | Webhook secret does not match the credential | Reset both from `github_hmac_secret` — watch for a trailing comment being captured with the value |
 | Activation dies on startup | A rulebook regex error, for example `[skip-ee-build]` read as a character range | Escape it, or match on plain text |
 | Activation cannot be updated | A running activation refuses PATCH | Delete and recreate it |
 | Forward job says "Nothing to build" on a private repo | No token | Phase 10 |
 | Definition deleted, no build | Deletions are not in a push's added or modified lists | Working as intended |
+
+### Checking that GitHub can reach the event stream
+
+The event stream URL is built from the hostname AAP knows itself by. If that
+name resolves, from the public internet, to an address GitHub cannot route to —
+an RFC1918 lab address, for instance — every delivery fails and nothing in AAP
+records an attempt. The event stream's `events_received` simply stops moving,
+which looks identical to the portal never having published.
+
+Ask GitHub, which is the only party that saw the failure:
+
+```bash
+gh api repos/<owner>/<definitions-repo>/hooks   --jq '.[] | "\(.id) \(.config.url) \(.last_response)"'
+gh api "repos/<owner>/<definitions-repo>/hooks/<id>/deliveries"   --jq '.[] | "\(.delivered_at) \(.event) \(.status_code) \(.status)"'
+```
+
+`502 failed to connect to host` means the name resolved and the socket did not
+open. Confirm with a resolver outside your own network:
+
+```bash
+nslookup <aap-hostname> 1.1.1.1
+```
+
+The fix is inbound reachability for that one path — a tunnel that dials out from
+the lab is the usual answer, preserving the original `Host` header so the
+gateway routes and redirects normally. AAP will not update the webhook for you,
+because it generates the URL from its own hostname: repoint the hook by hand at
+the reachable name, keeping the `/eda-event-streams/...` path exactly as it is.
+
+To recover a merge that was lost this way, replay the payload GitHub kept. Sign
+your serialized body with the stream's own secret — GitHub's stored signature
+covers its original bytes, not yours:
+
+```bash
+gh api "repos/<owner>/<repo>/hooks/<id>/deliveries/<delivery-id>"   --jq '.request.payload' > body.json
+SIG="sha256=$(openssl dgst -sha256 -hmac "$HMAC_SECRET" -hex < body.json | awk '{print $2}')"
+curl -sk -X POST "$EVENT_STREAM_URL"   -H 'Content-Type: application/json' -H 'X-GitHub-Event: push'   -H "X-Hub-Signature-256: $SIG" --data-binary @body.json
+```
+
+A `200` and an incremented `events_received` mean the rest of the chain is
+healthy and the only fault was reachability.
 
 ### The build fails
 

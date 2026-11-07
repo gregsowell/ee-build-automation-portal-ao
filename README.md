@@ -117,6 +117,14 @@ Then:
 
 ## Things that bite
 
+- **The event stream URL is only as reachable as AAP's own hostname.** AAP
+  builds it from the name it knows itself by, and hands you that URL for the
+  GitHub webhook. If the name resolves from the public internet to an address
+  GitHub cannot route to, every delivery fails with `502 failed to connect to
+  host` and nothing in AAP records the attempt — `events_received` just stops
+  moving, which is indistinguishable from the portal never publishing. GitHub's
+  delivery log is the only place the failure is visible. `INSTRUCTIONS.md` has
+  the check and how to replay a lost merge.
 - **The event stream starts in test mode.** Events are recorded but never reach
   the activation until you turn it off. Watch for this after a rerun of
   `configure_aap.yml`: it now leaves the current setting alone, but an earlier
