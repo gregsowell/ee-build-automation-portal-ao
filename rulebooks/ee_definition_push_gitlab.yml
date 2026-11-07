@@ -1,0 +1,53 @@
+---
+# Start an execution environment build when a definition lands on main in
+# GitLab.
+#
+# Rulebook activation: "EE Definition Push (GitLab)"
+#   Event stream: the GitLab event stream, which replaces the source below
+#   Variables: ee_forward_job_template, ee_organization (optional overrides)
+#
+# This is the GitLab counterpart of ee_definition_push.yml. The two cannot be
+# one rulebook, because an event stream attaches to a single source and the
+# payloads differ: GitLab sends no head_commit, identifies the push with
+# checkout_sha, and carries the repository under project as well as repository.
+#
+# Deliberately permissive. Which changed files are definitions, and whether the
+# push is one of the chain's own write-backs, is decided by the forward job,
+# which can read the files and the commit messages. A rulebook condition
+# cannot.
+- name: Execution environment definition pushed to GitLab
+  hosts: all
+  sources:
+    - ansible.eda.webhook:
+        host: 0.0.0.0
+        port: 5000
+
+  rules:
+    - name: Definition change on main starts a Build-EE run
+      condition: >-
+        event.payload.object_kind == "push" and
+        event.payload.ref == "refs/heads/main" and
+        event.payload.total_commits_count > 0
+      action:
+        run_job_template:
+          name: "{{ ee_forward_job_template | default('EE Build | Forward Event to AO') }}"
+          organization: "{{ ee_organization | default('Default') }}"
+          job_args:
+            extra_vars:
+              ee_event: "{{ event.payload }}"
+
+    - name: Log pushes that are skipped
+      condition: >-
+        event.payload.object_kind == "push" and
+        event.payload.ref != "refs/heads/main"
+      action:
+        debug:
+          msg: "Ignoring a push to {{ event.payload.ref }}; only main starts a build."
+
+    - name: Log a branch deletion
+      condition: >-
+        event.payload.object_kind == "push" and
+        event.payload.total_commits_count == 0
+      action:
+        debug:
+          msg: "Ignoring a push with no commits, such as a branch deletion."

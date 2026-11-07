@@ -56,7 +56,15 @@
         fail_msg: >-
           ee_event (the GitHub push payload), ao_webhook_path and ao_url are required.
 
-    - name: Read the push event
+    # GitHub and GitLab describe a push differently. GitLab sends
+    # object_kind, identifies the push with checkout_sha, has no head_commit,
+    # and carries the repository under project. Everything downstream works off
+    # the normalized facts below rather than either payload directly.
+    - name: Work out which forge sent this
+      ansible.builtin.set_fact:
+        _provider: "{{ 'gitlab' if ee_event.object_kind is defined else 'github' }}"
+
+    - name: Read a GitHub push event
       ansible.builtin.set_fact:
         _repo_url: "{{ ee_event.repository.clone_url }}"
         _repo_full_name: "{{ ee_event.repository.full_name }}"
@@ -64,6 +72,50 @@
         _sha: "{{ ee_event.after | default(ee_event.head_commit.id | default('')) }}"
         _pusher: "{{ ee_event.pusher.name | default(ee_event.sender.login | default('unknown')) }}"
         _commit_message: "{{ ee_event.head_commit.message | default('') }}"
+      when: _provider == 'github'
+
+    - name: Read a GitLab push event
+      vars:
+        # The head commit is the one checkout_sha names; fall back to the last
+        # in the list, which is the order GitLab sends them in.
+        _head: >-
+          {{ (ee_event.commits | default([])
+              | selectattr('id', 'equalto', ee_event.checkout_sha | default(''))
+              | list | first)
+             | default((ee_event.commits | default([]) | last) | default({}), true) }}
+      ansible.builtin.set_fact:
+        _repo_url: >-
+          {{ ee_event.project.http_url_to_repo
+             | default(ee_event.repository.git_http_url | default('')) }}
+        _repo_full_name: "{{ ee_event.project.path_with_namespace }}"
+        _ref: "{{ ee_event.ref | default('') }}"
+        _sha: "{{ ee_event.checkout_sha | default(ee_event.after | default('')) }}"
+        _pusher: >-
+          {{ ee_event.user_username | default(ee_event.user_name | default('unknown')) }}
+        _commit_message: "{{ _head.message | default('') }}"
+        _gitlab_project_id: "{{ ee_event.project.id }}"
+        # The API base, worked out from the project's own web URL so this
+        # playbook needs no hostname of its own.
+        _gitlab_base: >-
+          {{ ee_event.project.web_url
+             | regex_replace('/' ~ (ee_event.project.path_with_namespace | regex_escape) ~ '/?$', '') }}
+      when: _provider == 'gitlab'
+
+    # The chain commits approved fixes back to the repository. Those commits
+    # are marked, and must not start another build. The GitHub rulebook filters
+    # them out already; GitLab's cannot, because its payload has no head commit
+    # to read, so the check lives here for both.
+    - name: Stop when this push is one of our own write-backs
+      when: "'[skip-ee-build]' in _commit_message"
+      block:
+        - name: Say so
+          ansible.builtin.debug:
+            msg: >-
+              Ignoring {{ _sha[:7] }}: its commit message is marked
+              [skip-ee-build].
+
+        - name: End the play
+          ansible.builtin.meta: end_play
 
     - name: Collect every file the push added or changed
       ansible.builtin.set_fact:
@@ -94,17 +146,26 @@
           ansible.builtin.meta: end_play
 
     # Reading the file settles what it is, instead of guessing from its name.
+    # GitLab serves a file's bytes from the Repository Files API, with the path
+    # URL-encoded, slashes included. GitHub serves it either from the contents
+    # API with a token, or from the public raw host without one.
     - name: Fetch each changed YAML file at this commit
       ansible.builtin.uri:
         url: >-
-          {{ (ee_github_api ~ '/repos/' ~ _repo_full_name ~ '/contents/' ~ item ~ '?ref=' ~ _sha)
-             if ee_git_token | length > 0
-             else (ee_raw_url_base ~ '/' ~ _repo_full_name ~ '/' ~ _sha ~ '/' ~ item) }}
+          {{ (_gitlab_base ~ '/api/v4/projects/' ~ _gitlab_project_id
+              ~ '/repository/files/' ~ (item | urlencode | regex_replace('/', '%2F'))
+              ~ '/raw?ref=' ~ _sha)
+             if _provider == 'gitlab'
+             else ((ee_github_api ~ '/repos/' ~ _repo_full_name ~ '/contents/' ~ item ~ '?ref=' ~ _sha)
+                   if ee_git_token | length > 0
+                   else (ee_raw_url_base ~ '/' ~ _repo_full_name ~ '/' ~ _sha ~ '/' ~ item)) }}
         headers: >-
-          {{ {'Authorization': 'Bearer ' ~ ee_git_token,
-              'Accept': 'application/vnd.github.raw',
-              'X-GitHub-Api-Version': '2022-11-28'}
-             if ee_git_token | length > 0 else {} }}
+          {{ {'PRIVATE-TOKEN': ee_git_token}
+             if _provider == 'gitlab'
+             else ({'Authorization': 'Bearer ' ~ ee_git_token,
+                    'Accept': 'application/vnd.github.raw',
+                    'X-GitHub-Api-Version': '2022-11-28'}
+                   if ee_git_token | length > 0 else {}) }}
         return_content: true
         status_code: [200, 404]
       loop: "{{ _candidates }}"
