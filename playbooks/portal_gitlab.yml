@@ -72,6 +72,14 @@
           app.scopes = {{ portal_oauth_scopes | to_json }}
           app.confidential = true
           app.trusted = false
+          # GitLab 18 and later require every OAuth application to belong to an
+          # organization, enforced by a database constraint rather than a model
+          # validation, so a missing one surfaces as PG::CheckViolation.
+          if app.respond_to?(:organization_id) && app.organization_id.nil?
+            org = Organizations::Organization.respond_to?(:default_organization)                     ? Organizations::Organization.default_organization                     : Organizations::Organization.first
+            raise 'no default organization to own the application' if org.nil?
+            app.organization_id = org.id
+          end
           app.renew_secret if app.respond_to?(:renew_secret)
           raise app.errors.full_messages.join(', ') unless app.save
           secret = app.respond_to?(:plaintext_secret) ? app.plaintext_secret : app.secret
@@ -80,6 +88,22 @@
       register: _oauth
       no_log: true
       changed_when: true
+      failed_when: false
+
+    # The task above hides its output, so a failure would otherwise be
+    # reported as "censored" with no cause. The script prints the application
+    # id and the secret on one line and nothing else, so anything that is not
+    # two fields is an error worth showing.
+    - name: Report an OAuth failure without printing the secret
+      ansible.builtin.fail:
+        msg: >-
+          Could not create the OAuth application:
+          {{ (_oauth.stderr | default('', true)
+              | regex_replace('[0-9a-f]{32,}', '<redacted>')
+              | regex_replace('\s+', ' '))[:400] | default('no error text', true) }}
+      when: >-
+        {{ _oauth.rc | default(1) != 0
+           or (_oauth.stdout | default('')).split() | length != 2 }}
 
     - name: Issue the portal's access token
       ansible.builtin.command:
