@@ -44,6 +44,25 @@
         debug:
           msg: "Ignoring a push to {{ event.payload.ref }}; only main starts a build."
 
+    # The portal opens one merge request per execution environment, and
+    # merging it is what starts the build. Which merge requests are the
+    # portal's is decided by the job, which can read the title, the author and
+    # the project; the condition here only narrows it to ones still open
+    # against the build branch.
+    - name: A portal merge request is merged for you
+      condition: >-
+        event.payload.object_kind == "merge_request" and
+        event.payload.object_attributes.action in ["open", "reopen", "update"] and
+        event.payload.object_attributes.state == "opened" and
+        event.payload.object_attributes.target_branch == "main"
+      action:
+        run_job_template:
+          name: "{{ ee_merge_job_template | default('EE Build | Merge Portal MR') }}"
+          organization: "{{ ee_organization | default('Default') }}"
+          job_args:
+            extra_vars:
+              ee_event: "{{ event.payload }}"
+
     - name: Log a branch deletion
       condition: >-
         event.payload.object_kind == "push" and

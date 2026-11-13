@@ -1,0 +1,157 @@
+---
+# Merge the merge requests the automation portal opens for execution
+# environments.
+#
+# Job template: "EE Build | Merge Portal MR"  (prompt on launch: extra variables)
+# Inventory:    any inventory with localhost
+# Credentials:  "EE Definitions GitLab Token"
+#
+# The portal opens one merge request per execution environment, and merging it
+# is what starts the build chain. In a lab where the portal is the only author,
+# that click adds nothing. This is the GitLab counterpart of the GitHub Actions
+# workflow in definitions-repo/.github/workflows/, which cannot be used here:
+# GitLab's equivalent would be a CI job, and this GitLab runs with CI disabled
+# and no runners, so the merge is driven from Event-Driven Ansible instead.
+#
+# Anything that is not the portal's own merge request is left alone: a
+# different title, a fork, a draft, a target other than the definitions
+# branch.
+#
+# Required variables
+#   ee_event   The GitLab merge_request payload (event.payload from the rulebook)
+- name: Merge a portal merge request
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    ee_git_token: ""
+    ee_git_branch: main
+    # The portal titles every one of these the same way. Matching on it is what
+    # separates the portal's merge requests from everyone else's.
+    portal_mr_title_prefix: "[AAP] Adds/updates files for Execution Environment"
+    # Squashing keeps one commit per execution environment on the branch, and
+    # the squash message defaults to the merge request title, which carries no
+    # skip marker, so the merge starts a build the way a hand merge would.
+    portal_mr_squash: true
+    portal_mr_remove_branch: true
+    # GitLab reports a merge request as "checking" for a moment after it opens.
+    portal_mr_retries: 12
+    portal_mr_delay: 5
+
+  tasks:
+    - name: Check the required variables
+      ansible.builtin.assert:
+        that:
+          - ee_event is defined
+          - ee_event.object_attributes is defined
+          - ee_git_token | default('', true) | length > 0
+        fail_msg: >-
+          ee_event (the GitLab merge_request payload) and a GitLab token are
+          required.
+
+    - name: Read the merge request
+      vars:
+        _mr: "{{ ee_event.object_attributes }}"
+      ansible.builtin.set_fact:
+        _project_id: "{{ ee_event.project.id }}"
+        _iid: "{{ _mr.iid }}"
+        _title: "{{ _mr.title | default('') }}"
+        _state: "{{ _mr.state | default('') }}"
+        _draft: "{{ _mr.draft | default(_mr.work_in_progress | default(false)) }}"
+        _target: "{{ _mr.target_branch | default('') }}"
+        _source_project: "{{ _mr.source_project_id | default(0) }}"
+        _target_project: "{{ _mr.target_project_id | default(0) }}"
+        _author: "{{ ee_event.user.username | default('unknown') }}"
+        # Worked out from the project's own web URL, so this playbook needs no
+        # hostname of its own.
+        _api: >-
+          {{ ee_event.project.web_url
+             | regex_replace('/' ~ (ee_event.project.path_with_namespace | regex_escape) ~ '/?$', '')
+             ~ '/api/v4' }}
+
+    - name: Decide whether this is one of the portal's
+      ansible.builtin.set_fact:
+        _ours: >-
+          {{ _title.startswith(portal_mr_title_prefix)
+             and _state == 'opened'
+             and not (_draft | bool)
+             and _target == ee_git_branch
+             and _source_project | int == _target_project | int }}
+
+    - name: Leave anything else alone
+      when: not _ours | bool
+      block:
+        - name: Say why
+          ansible.builtin.debug:
+            msg: >-
+              Not merging !{{ _iid }} "{{ _title }}" by {{ _author }}:
+              state={{ _state }}, draft={{ _draft }}, target={{ _target }},
+              {{ 'from a fork' if _source_project | int != _target_project | int
+                 else 'same project' }},
+              title {{ 'matches' if _title.startswith(portal_mr_title_prefix)
+                       else 'does not match' }} the portal's.
+
+        - name: End the play
+          ansible.builtin.meta: end_play
+
+    # A merge request is "checking" for a moment after it opens, and GitLab
+    # refuses a merge until it has worked out that it can be merged.
+    - name: Wait for GitLab to say it can be merged
+      ansible.builtin.uri:
+        url: "{{ _api }}/projects/{{ _project_id }}/merge_requests/{{ _iid }}"
+        headers:
+          PRIVATE-TOKEN: "{{ ee_git_token }}"
+        status_code: [200]
+      register: _mr_state
+      retries: "{{ portal_mr_retries }}"
+      delay: "{{ portal_mr_delay }}"
+      until: >-
+        _mr_state.json.detailed_merge_status | default('checking')
+          not in ['checking', 'unchecked', 'preparing']
+      changed_when: false
+      no_log: true
+
+    - name: Stop when it cannot be merged
+      when: >-
+        _mr_state.json.detailed_merge_status | default('') not in
+        ['mergeable', 'ci_still_running', 'ci_must_pass']
+      block:
+        - name: Say what GitLab thinks
+          ansible.builtin.debug:
+            msg: >-
+              Not merging !{{ _iid }}: GitLab reports
+              {{ _mr_state.json.detailed_merge_status | default('no status') }}.
+
+        - name: End the play
+          ansible.builtin.meta: end_play
+
+    - name: Merge it
+      ansible.builtin.uri:
+        url: "{{ _api }}/projects/{{ _project_id }}/merge_requests/{{ _iid }}/merge"
+        method: PUT
+        headers:
+          PRIVATE-TOKEN: "{{ ee_git_token }}"
+        body_format: json
+        body:
+          squash: "{{ portal_mr_squash | bool }}"
+          should_remove_source_branch: "{{ portal_mr_remove_branch | bool }}"
+        status_code: [200]
+      register: _merged
+      no_log: true
+
+    - name: Publish the result
+      ansible.builtin.set_stats:
+        aggregate: false
+        per_host: false
+        data:
+          portal_mr_result: merged
+          portal_mr_iid: "{{ _iid }}"
+          portal_mr_sha: "{{ _merged.json.merge_commit_sha | default(_merged.json.sha | default('')) }}"
+
+    - name: Say what happened
+      ansible.builtin.debug:
+        msg: >-
+          Merged !{{ _iid }} "{{ _title }}" into {{ ee_git_branch }} as
+          {{ (_merged.json.merge_commit_sha | default(_merged.json.sha | default('')))[:7] }}.
+          The push that merge creates is what starts the build.
