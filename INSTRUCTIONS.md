@@ -38,9 +38,9 @@ the next until it passes.
 |---|---|---|
 | Build execution environments from **git pushes**? | Phases 1–7. This is the core; everything else is optional. | Nothing to build. |
 | Have failed builds **repaired by an LLM**? | Phase 8. Needs an LLM provider and an API key they pay for. | Skip Phase 8; a failed build stops and notifies. |
-| Build from the **automation portal's GUI builder**? | Phase 9. Needs a portal, a GitHub OAuth app and a token. | Skip Phase 9; definitions are written by hand. |
+| Build from the **automation portal's GUI builder**? | Phase 9. Needs a portal, plus an OAuth application and a token on your forge. | Skip Phase 9; definitions are written by hand. |
 | Keep the definitions repository **private**? | Phase 10. Recommended: the portal writes your hub's hostname into each EE. | Skip Phase 10. |
-| **Merge the portal's pull requests automatically**? | Phase 11. Fully hands-off, and removes the last human checkpoint. | Skip Phase 11; merge them yourself. |
+| **Merge the portal's requests automatically**? | Phase 11. Fully hands-off, and removes the last human checkpoint. | Skip Phase 11; merge them yourself. |
 | **Write an approved fix back** to the repository? | Phase 12. Without it, the repo keeps a definition known not to build. | Skip Phase 12. |
 | Stock the hub with **collections** first? | Phase 5. Builds only see what the hub holds. | Skip if the hub already carries what the EEs need. |
 
@@ -55,10 +55,11 @@ the next until it passes.
 | Private automation hub host, and an account that can push to its registry | A dedicated account is better than admin; see Phase 4 |
 | registry.redhat.io service account | For base images: access.redhat.com/terms-based-registry |
 | A repository for definitions, and one for this automation | Two repositories, not one |
-| GitHub token | Fine-grained, on the definitions repository, **Contents: read and write** and **Pull requests: read and write** |
-| An HMAC secret | `openssl rand -hex 32`, shared between GitHub and the event stream |
+| A forge for the definitions, reachable **from the event stream and back** | See the warning below. An in-lab GitLab is the safe answer; GitHub works if AAP is reachable from it |
+| A token on that forge | GitHub: fine-grained, **Contents: read and write** and **Pull requests: read and write**. GitLab: `api` and `write_repository`. `playbooks/gitlab_bootstrap.yml` mints the GitLab one |
+| A shared secret for the webhook | `openssl rand -hex 32`. GitHub signs with it (HMAC); GitLab sends it as a token. Both ends must match |
 | LLM provider and API key | Phase 8 only. Read its caveats before choosing a provider. |
-| GitHub OAuth app client ID and secret | Phase 9 only |
+| An OAuth application on that forge | Phase 9 only. `playbooks/portal_gitlab.yml` creates the GitLab one |
 
 Confirm before starting: **which AAP, which orchestrator, which hub.** A demo
 platform and a production platform look alike from an API.
@@ -92,6 +93,14 @@ Two repositories:
   holds no secrets and no hostnames.
 - **A definitions repository** — one directory per execution environment. The
   portal publishes here, and a push to `main` is what starts a build.
+
+> **Pick a forge the event stream can be reached from.** The forge has to
+> connect *inward* to the Event-Driven Ansible event stream to report a push.
+> If AAP's hostname resolves to a private address from outside, every delivery
+> from a hosted forge fails with `failed to connect to host`, and **nothing in
+> AAP records the attempt** — the chain is simply silent. An in-lab GitLab has
+> no such problem. `playbooks/install_gitlab.yml` will put one on the build
+> host, tuned to stay out of the way of builds.
 
 ```bash
 gh repo create <you>/ee-definitions --private   # private: see Phase 10
@@ -251,26 +260,41 @@ wire it into the workflow.
 
 ## Phase 9: The automation portal (optional)
 
-Two GitHub registrations, both created by the human:
+The portal needs the forge twice: an **OAuth application**, so the builder
+pushes as the signed-in person, and a **token**, so the portal can read
+projects and register catalog entries.
 
-- an **OAuth app** — the builder pushes as the signed-in user. Callback:
-  `https://<portal>/api/auth/github/handler/frame`
-- a **token** — the portal reads repositories and registers catalog entries
+For GitLab, two playbooks do it:
 
-Add both to `/etc/portal/configs/app-config/app-config.production.yaml`, along
-with the hub collection provider, then restart. See
-[portal/README.md](portal/README.md) for the exact blocks.
+```bash
+ansible-playbook playbooks/portal_gitlab.yml \
+  -e portal_fqdn=<portal-fqdn> -e gitlab_external_url=<gitlab-url>
+ansible-playbook playbooks/portal_gitlab_config.yml \
+  -e portal_host=<inventory-name> -e portal_fqdn=<portal-fqdn> \
+  -e gitlab_external_url=<gitlab-url>
+```
+
+The first creates both and leaves them in a root-only file on the GitLab host,
+so neither reaches a job's event records. The second merges them into
+`/etc/portal/configs/app-config/app-config.production.yaml`, along with the
+catalog location the builder template is served from. It keeps the previous
+file, parses the new one before restarting, and waits for the provider to
+answer.
+
+For GitHub, create the OAuth app and the token yourself and add the equivalent
+blocks by hand. Either way, add the hub collection provider too, or the builder
+has no collections to offer. See [portal/README.md](portal/README.md) for every
+block and what each value does.
 
 **Verify:**
 
 ```bash
-curl -sk -o /dev/null -w '%{http_code}\n' https://<portal>/api/auth/github/handler/frame
+curl -sk -o /dev/null -w '%{http_code}\n' https://<portal>/api/auth/gitlab/handler/frame
 ```
 
 `400` means the provider is registered (no authorization code was supplied);
 `404` means it is not. Allow a minute after a restart. The Collections page
 should list what the hub holds.
-
 ---
 
 ## Phase 10: A private definitions repository (optional)
@@ -289,21 +313,40 @@ is a definition, gets a 404, concludes there is nothing to build, and succeeds.
 
 ---
 
-## Phase 11: Merge the portal's pull requests automatically (optional)
+## Phase 11: Merge the portal's requests automatically (optional)
 
-Copy
+The portal opens one request per execution environment, and merging it is what
+starts the build. Where the portal is the only author, that click adds nothing.
+
+**On GitHub**, copy
 [`definitions-repo/.github/workflows/auto-merge-portal-ee.yml`](definitions-repo/.github/workflows/auto-merge-portal-ee.yml)
-into the **definitions** repository. It merges only pull requests whose title starts with
-`[AAP] Adds/updates files for Execution Environment`, raised from a branch in
-the same repository by its owner.
+into the **definitions** repository. It merges only pull requests whose title
+starts with `[AAP] Adds/updates files for Execution Environment`, raised from a
+branch in the same repository by its owner.
 
-**Verify:** a portal pull request merges itself, and the merge — authored by
-`github-actions[bot]` — still triggers the chain. It does: Actions suppresses
-workflow triggers from its own token, but webhooks fire regardless.
+**On GitLab**, the equivalent would be a CI job, which needs a runner and the
+builds feature that `install_gitlab.yml` turns off to save memory. So the merge
+runs from the event stream that is already there:
+
+1. Turn on merge request events on the project webhook, beside push events.
+2. `rulebooks/ee_definition_push_gitlab.yml` already carries the rule. It
+   narrows to merge requests still open against the build branch and hands the
+   payload to a job; title, author, draft state and whether it came from a fork
+   are decided there, where they can be read properly.
+3. Create a job template **EE Build | Merge Portal MR** on
+   `playbooks/gitlab_merge_portal_mr.yml`, with the GitLab token credential.
+
+The merge is squashed, so the branch keeps one commit per execution
+environment, and the squash message defaults to the merge request title, which
+carries no skip marker, so it starts a build the way a hand merge would.
+
+**Verify:** a portal request merges itself, and the merge still starts the
+chain. It does on both forges: GitHub Actions suppresses workflow triggers from
+its own token but webhooks fire regardless, and on GitLab the merge is an
+ordinary push by the token's user.
 
 This removes the last human checkpoint before an image reaches your hub. The
 approval gate for agent-modified definitions still stands.
-
 ---
 
 ## Phase 12: Write approved fixes back (optional)
@@ -322,6 +365,7 @@ starts.
 
 | Test | Do | Expect |
 |---|---|---|
+| Portal round trip | Build one in the portal and publish it | A request is opened, merged (Phase 11), and the merge starts the chain |
 | Happy path | Push a valid definition | Builds first try, registers, no approval |
 | Repair | Push one with a misspelled collection | Fails, agent corrects it, rebuilds, waits for approval |
 | Approval | Approve it | Registers, and commits the fix back (Phase 12) |
@@ -343,7 +387,7 @@ Everything here was hit during the original build.
 | Symptom | Cause | Fix |
 |---|---|---|
 | GitHub reports 200, stream counts the event, nothing runs | Event stream in test mode | Turn test mode off |
-| Portal merged the pull request, stream count never moved | GitHub cannot reach the event stream URL | See *Checking that GitHub can reach the event stream* below |
+| Portal merged the request, stream count never moved | The forge cannot reach the event stream URL | See *Checking that GitHub can reach the event stream* below. An in-lab GitLab does not have this problem |
 | Event stream logs "Signature mismatch" | Webhook secret does not match the credential | Reset both from `github_hmac_secret` — watch for a trailing comment being captured with the value |
 | Activation dies on startup | A rulebook regex error, for example `[skip-ee-build]` read as a character range | Escape it, or match on plain text |
 | Activation cannot be updated | A running activation refuses PATCH | Delete and recreate it |
@@ -496,12 +540,14 @@ hub 4.12.2; automation orchestrator 2026.8 on MicroShift; automation portal
 ansible-builder 3.1.1; OpenAI as the LLM provider; a private GitHub definitions
 repository, and a self-hosted GitLab CE 19.5 one on the build host itself.
 
-Exercised end to end: a portal-built EE from its pull request through to
-registration; a hand-pushed definition repaired twice by the agent and approved;
-rejection; the agent declining to retry; cleanup and its rerun; and a private
-repository with a token.
+Exercised end to end on GitHub: a portal-built EE from its pull request through
+to registration; a hand-pushed definition repaired twice by the agent and
+approved; rejection; the agent declining to retry; cleanup and its rerun; and a
+private repository with a token.
 
-The same chain was then run against GitLab: a hand-pushed definition with two
+Then moved to GitLab and exercised again: a hand-pushed definition with two
 separate faults, repaired twice by the agent, registered in the hub and the
-controller, and the fix committed back to GitLab with the loop marker, which
-the forward step correctly ignored on its way back round.
+controller, and the fix committed back with the loop marker, which the forward
+step correctly ignored on its way back round. A merge request titled the way
+the portal titles them was merged by the rule in Phase 11, and that merge built
+and registered an execution environment without anyone touching it.
