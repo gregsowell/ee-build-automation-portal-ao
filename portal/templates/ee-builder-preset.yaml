@@ -3,7 +3,7 @@
 # publishing target filled in, so the builder opens on the right repository
 # instead of asking for it every time.
 #
-# Replace CHANGEME_GITHUB_OWNER and CHANGEME_DEFINITIONS_REPO, put the file
+# Replace every CHANGEME_ value, put the file
 # somewhere the portal can read, and register it under catalog.locations.
 # See portal/README.md.
 #
@@ -277,9 +277,9 @@ spec:
                   ui:field: ScmSelector
                   ui:options:
                     providers:
-                    - label: Github
-                      provider: github
-                      host: github.com
+                    - label: CHANGEME_SCM_LABEL
+                      provider: CHANGEME_SCM_PROVIDER
+                      host: CHANGEME_SCM_HOST
                     requestUserCredentials:
                       secretsKey: USER_OAUTH_TOKEN
                       additionalScopes:
@@ -291,13 +291,13 @@ spec:
                   properties:
                     provider:
                       type: string
-                      default: github
+                      default: CHANGEME_SCM_PROVIDER
                     providerLabel:
                       type: string
-                      default: Github
+                      default: CHANGEME_SCM_LABEL
                     org:
                       type: string
-                      default: CHANGEME_GITHUB_OWNER
+                      default: CHANGEME_SCM_OWNER
                     repoName:
                       type: string
                       default: CHANGEME_DEFINITIONS_REPO

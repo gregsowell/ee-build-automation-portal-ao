@@ -1,0 +1,215 @@
+---
+# Point the automation portal at GitLab: the integration it reads projects
+# with, the OAuth provider it pushes as the signed-in person with, and the
+# catalog location it serves the execution environment builder template from.
+#
+# Job template: "EE Build | Point Portal At GitLab"  (prompt on launch: extra variables)
+# Inventory:    one holding both the GitLab host and the portal appliance
+# Credentials:  a machine credential that can reach both, with become
+#
+# Run playbooks/portal_gitlab.yml first. It creates the OAuth application and
+# the access token and leaves them in a root-only file on the GitLab host,
+# which this reads directly. Neither value is ever passed as a job variable,
+# so neither lands in the job's event records.
+#
+# The appliance's config is rewritten rather than patched in place: it is
+# parsed, merged and written back, so a hand-made comment in it does not
+# survive. The previous file is kept beside it with a timestamp, and the new
+# one is parsed again before the portal is restarted.
+#
+# Required variables
+#   portal_host          Inventory name of the portal appliance
+#   portal_fqdn          Its hostname, for the OAuth callback
+#   gitlab_external_url  Where GitLab answers
+#   gitlab_group         The group holding the definitions project
+#   gitlab_project       The definitions project
+- name: Read the portal's GitLab credentials off the GitLab host
+  hosts: "{{ gitlab_host | default('ee-builder') }}"
+  become: true
+  gather_facts: false
+
+  vars:
+    portal_credential_file: /root/portal-gitlab.yml
+
+  tasks:
+    - name: Fetch the file portal_gitlab.yml wrote
+      ansible.builtin.slurp:
+        src: "{{ portal_credential_file }}"
+      register: _cred_raw
+      no_log: true
+
+    - name: Keep it as a fact for the portal play
+      ansible.builtin.set_fact:
+        portal_gitlab: "{{ _cred_raw.content | b64decode | from_yaml }}"
+      no_log: true
+
+    - name: Check it carries what the portal needs
+      ansible.builtin.assert:
+        that:
+          - portal_gitlab.portal_gitlab_client_id | default('', true) | length > 0
+          - portal_gitlab.portal_gitlab_client_secret | default('', true) | length > 0
+          - portal_gitlab.portal_gitlab_token | default('', true) | length > 0
+        fail_msg: >-
+          {{ portal_credential_file }} is missing one of the three values.
+          Run playbooks/portal_gitlab.yml again.
+
+- name: Point the portal at GitLab
+  hosts: "{{ portal_host }}"
+  become: true
+  gather_facts: true
+
+  vars:
+    portal_fqdn: ""
+    gitlab_external_url: ""
+    gitlab_group: automation
+    gitlab_project: ee-definitions
+    portal_config: /etc/portal/configs/app-config/app-config.production.yaml
+    portal_preset_path: .portal/ee-builder-preset.yaml
+    portal_restart: true
+    # Taken from the first play, so no secret travels as a job variable.
+    _gl: "{{ hostvars[gitlab_host | default('ee-builder')]['portal_gitlab'] }}"
+
+  tasks:
+    - name: Check the required variables
+      ansible.builtin.assert:
+        that:
+          - portal_fqdn | default('', true) | length > 0
+          - gitlab_external_url | default('', true) | length > 0
+        fail_msg: portal_fqdn and gitlab_external_url are required.
+
+    - name: Work out the addresses
+      ansible.builtin.set_fact:
+        _gl_base: "{{ gitlab_external_url | regex_replace('/$', '') }}"
+        _gl_host: "{{ gitlab_external_url | regex_replace('^https?://', '') | regex_replace('/$', '') }}"
+
+    - name: Work out where the builder template lives
+      ansible.builtin.set_fact:
+        _preset_url: >-
+          {{ _gl_base }}/{{ gitlab_group }}/{{ gitlab_project }}/-/raw/main/{{ portal_preset_path }}
+
+    - name: Read the portal's configuration
+      ansible.builtin.slurp:
+        src: "{{ portal_config }}"
+      register: _cfg_raw
+
+    - name: Parse it
+      ansible.builtin.set_fact:
+        _cfg: "{{ _cfg_raw.content | b64decode | from_yaml }}"
+
+    - name: Keep a copy of what is there now
+      ansible.builtin.copy:
+        src: "{{ portal_config }}"
+        dest: "{{ portal_config }}.{{ ansible_date_time.iso8601_basic_short }}"
+        remote_src: true
+        mode: preserve
+
+    # integrations.gitlab and catalog.locations are lists, which a recursive
+    # combine would replace wholesale rather than merge. Each is rebuilt here:
+    # everything that is not ours, plus ours.
+    - name: Build the GitLab integration list
+      vars:
+        _others: >-
+          {{ (_cfg.integrations.gitlab | default([]))
+             | rejectattr('host', 'equalto', _gl_host) | list }}
+      ansible.builtin.set_fact:
+        _integrations_gitlab: >-
+          {{ _others + [{
+               'host': _gl_host,
+               'token': _gl.portal_gitlab_token,
+               'baseUrl': _gl_base,
+               'apiBaseUrl': _gl_base ~ '/api/v4',
+             }] }}
+      no_log: true
+
+    - name: Build the catalog location list
+      vars:
+        _others: >-
+          {{ (_cfg.catalog.locations | default([]))
+             | rejectattr('target', 'search', portal_preset_path | regex_escape) | list }}
+      ansible.builtin.set_fact:
+        _catalog_locations: >-
+          {{ _others + [{
+               'type': 'url',
+               'target': _preset_url,
+               'rules': [{'allow': ['Template']}],
+             }] }}
+
+    - name: Merge GitLab into the configuration
+      vars:
+        _additions:
+          integrations:
+            gitlab: "{{ _integrations_gitlab }}"
+          auth:
+            environment: production
+            providers:
+              gitlab:
+                production:
+                  clientId: "{{ _gl.portal_gitlab_client_id }}"
+                  clientSecret: "{{ _gl.portal_gitlab_client_secret }}"
+                  audience: "{{ _gl_base }}"
+                  callbackUrl: "https://{{ portal_fqdn }}/api/auth/gitlab/handler/frame"
+          catalog:
+            locations: "{{ _catalog_locations }}"
+      ansible.builtin.set_fact:
+        _merged: "{{ _cfg | combine(_additions, recursive=True) }}"
+      no_log: true
+
+    - name: Write it back
+      ansible.builtin.copy:
+        dest: "{{ portal_config }}"
+        content: "{{ _merged | to_nice_yaml(indent=2, width=200) }}"
+        owner: root
+        group: root
+        mode: "0600"
+        backup: true
+      register: _written
+      no_log: true
+
+    # A portal that cannot parse its own configuration does not start, and the
+    # backup above is then the only way back, so check before restarting.
+    - name: Parse the file that was just written
+      ansible.builtin.slurp:
+        src: "{{ portal_config }}"
+      register: _verify_raw
+
+    - name: Check the three things landed
+      vars:
+        _v: "{{ _verify_raw.content | b64decode | from_yaml }}"
+      ansible.builtin.assert:
+        that:
+          - _v.auth.providers.gitlab.production.clientId | default('') | length > 0
+          - (_v.integrations.gitlab | default([]) | selectattr('host', 'equalto', _gl_host) | list) | length == 1
+          - (_v.catalog.locations | default([]) | selectattr('target', 'equalto', _preset_url) | list) | length == 1
+        fail_msg: >-
+          The rewritten configuration is missing the GitLab auth provider, the
+          integration or the catalog location. The previous file is beside it
+          with a timestamp; put it back before restarting the portal.
+      no_log: true
+
+    - name: Restart the portal
+      ansible.builtin.command:
+        cmd: ansible-portal restart
+      when: portal_restart | bool
+      changed_when: true
+
+    # The portal answers 404 for an auth provider it does not know and 400 for
+    # one it does, and it answers 404 for a minute after a restart while the
+    # auth plugin initializes.
+    - name: Wait for the GitLab auth provider to come up
+      ansible.builtin.uri:
+        url: "https://{{ portal_fqdn }}/api/auth/gitlab/handler/frame"
+        validate_certs: false
+        status_code: [400]
+      register: _probe
+      retries: 20
+      delay: 15
+      until: _probe.status == 400
+      when: portal_restart | bool
+
+    - name: Say what the portal will do now
+      ansible.builtin.debug:
+        msg:
+          - "The portal reads {{ _gl_host }} with the integration token."
+          - "People signing in can publish as themselves through the OAuth application."
+          - "The execution environment builder is served from {{ _preset_url }}."
+          - "Its publish target defaults to {{ gitlab_group }}/{{ gitlab_project }} on {{ _gl_host }}."
