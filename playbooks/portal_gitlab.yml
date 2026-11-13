@@ -1,0 +1,160 @@
+---
+# Give the automation portal what it needs to publish execution environment
+# definitions to the in-lab GitLab instead of GitHub.
+#
+# Job template: "EE Build | Portal GitLab Credentials"  (prompt on launch: extra variables)
+# Inventory:    the inventory holding the GitLab host, limited to that host
+# Credentials:  a machine credential for that host, with become
+#
+# The portal needs GitLab twice, the same way it needed GitHub twice:
+#
+#   an OAuth application  the builder pushes as the signed-in user, with that
+#                         user's OAuth token (auth.providers.gitlab)
+#   an access token       the portal reads projects and registers catalog
+#                         entries (integrations.gitlab)
+#
+# Both are created here and written to a single root-only file on the GitLab
+# host. Nothing secret is printed, so none of it lands in the job's event
+# records; copy the values from that file into the appliance's
+# app-config.production.yaml.
+#
+# A GitLab OAuth application's secret is stored hashed, so an existing
+# application cannot be read back. Re-running this therefore issues a fresh
+# secret and the portal config has to be updated with it. That is the only
+# way round it, and it is why the file is rewritten every time.
+#
+# Required variables
+#   portal_fqdn            The portal's own hostname, for the callback URL
+#   gitlab_external_url    Where GitLab answers, e.g. http://git.example.com
+- name: Create the portal's GitLab credentials
+  hosts: "{{ gitlab_host | default('ee-builder') }}"
+  become: true
+  gather_facts: false
+
+  vars:
+    portal_fqdn: ""
+    gitlab_external_url: ""
+    portal_oauth_app_name: Ansible automation portal
+    # read_user identifies the signed-in person; api and write_repository let
+    # the builder open a merge request as them. openid, profile and email are
+    # what Backstage asks for when it resolves that person to a catalog user.
+    portal_oauth_scopes: api read_user read_repository write_repository openid profile email
+    portal_token_name: automation-portal
+    portal_token_scopes: "api"
+    portal_token_days: 364
+    # Where the values land on the GitLab host. Root-only.
+    portal_credential_file: /root/portal-gitlab.yml
+
+  tasks:
+    - name: Check the required variables
+      ansible.builtin.assert:
+        that:
+          - portal_fqdn | default('', true) | length > 0
+          - gitlab_external_url | default('', true) | length > 0
+        fail_msg: >-
+          portal_fqdn (the portal's hostname, with no scheme) and
+          gitlab_external_url are required.
+
+    - name: Work out the callback URL
+      ansible.builtin.set_fact:
+        _callback: "https://{{ portal_fqdn }}/api/auth/gitlab/handler/frame"
+
+    # Doorkeeper stores the secret hashed, so an application that already
+    # exists is given a new one rather than read back.
+    - name: Create or refresh the OAuth application
+      ansible.builtin.command:
+        cmd: gitlab-rails runner -
+        stdin: |
+          name = {{ portal_oauth_app_name | to_json }}
+          app = Doorkeeper::Application.find_by(name: name, owner_id: nil, owner_type: nil)
+          app ||= Doorkeeper::Application.new(name: name)
+          app.redirect_uri = {{ _callback | to_json }}
+          app.scopes = {{ portal_oauth_scopes | to_json }}
+          app.confidential = true
+          app.trusted = false
+          app.renew_secret if app.respond_to?(:renew_secret)
+          raise app.errors.full_messages.join(', ') unless app.save
+          secret = app.respond_to?(:plaintext_secret) ? app.plaintext_secret : app.secret
+          raise 'no secret available' if secret.to_s.empty?
+          print [app.uid, secret].join(' ')
+      register: _oauth
+      no_log: true
+      changed_when: true
+
+    - name: Issue the portal's access token
+      ansible.builtin.command:
+        cmd: gitlab-rails runner -
+        stdin: |
+          user = User.find_by_username('root')
+          raise 'no root user' if user.nil?
+          name = {{ portal_token_name | to_json }}
+          user.personal_access_tokens.active.where(name: name).each(&:revoke!)
+          token = user.personal_access_tokens.create!(
+            name: name,
+            scopes: {{ portal_token_scopes.split(',') | to_json }},
+            expires_at: {{ portal_token_days | int }}.days.from_now,
+          )
+          raise token.errors.full_messages.join(', ') unless token.persisted?
+          print token.token
+      register: _pat
+      no_log: true
+      changed_when: true
+
+    - name: Write the values where the portal's administrator can fetch them
+      ansible.builtin.copy:
+        dest: "{{ portal_credential_file }}"
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          # Values for the automation portal's app-config.production.yaml.
+          # Created by playbooks/portal_gitlab.yml on {{ now(true, '%Y-%m-%dT%H:%M:%SZ') }}.
+          # The OAuth secret is stored hashed in GitLab and cannot be read back,
+          # so re-running that playbook invalidates the secret below.
+          portal_gitlab_host: {{ gitlab_external_url | regex_replace('^https?://', '') | regex_replace('/$', '') }}
+          portal_gitlab_base_url: {{ gitlab_external_url | regex_replace('/$', '') }}
+          portal_gitlab_callback: {{ _callback }}
+          portal_gitlab_client_id: {{ _oauth.stdout.split() | first }}
+          portal_gitlab_client_secret: {{ _oauth.stdout.split() | last }}
+          portal_gitlab_token: {{ _pat.stdout | trim }}
+      no_log: true
+
+    - name: Say where the values are, without saying what they are
+      ansible.builtin.debug:
+        msg:
+          - "OAuth application '{{ portal_oauth_app_name }}' now redirects to {{ _callback }}."
+          - "Access token '{{ portal_token_name }}' issued, scopes {{ portal_token_scopes }}, valid {{ portal_token_days }} days."
+          - "Both written to {{ portal_credential_file }} on {{ inventory_hostname }}, readable by root only."
+          - "Copy them into app-config.production.yaml on the portal, then restart it."
+
+# The portal answers 404 on an auth provider it does not know about and 400 on
+# one it does, so the same request tells you whether the configuration took.
+- name: Check whether the portal has the GitLab provider yet
+  hosts: "{{ portal_probe_host | default('ee-builder') }}"
+  gather_facts: false
+
+  vars:
+    portal_fqdn: ""
+
+  tasks:
+    - name: Ask the portal for its GitLab auth handler
+      ansible.builtin.uri:
+        url: "https://{{ portal_fqdn }}/api/auth/gitlab/handler/frame"
+        validate_certs: false
+        status_code: [200, 400, 404, 500]
+      register: _probe
+      changed_when: false
+      failed_when: false
+
+    - name: Report what it said
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'The portal has the GitLab auth provider (400 = called without an
+              authorization code, which is expected here).'
+             if _probe.status == 400
+             else ('The portal does not have the GitLab auth provider yet (404).
+                    Add auth.providers.gitlab to app-config.production.yaml and
+                    restart. It answers 404 for a minute after a restart.'
+                   if _probe.status == 404
+                   else 'The portal answered ' ~ _probe.status ~ ', which is neither
+                         400 nor 404; check that it is running.') }}
