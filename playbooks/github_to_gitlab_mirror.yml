@@ -1,0 +1,287 @@
+---
+# Carry definitions the automation portal publishes to GitHub across to
+# GitLab, so the build chain sees them.
+#
+# Job template: "EE Build | Mirror GitHub To GitLab"  (schedule it; every couple of minutes is plenty)
+# Inventory:    the inventory holding the build host, limited to that host
+# Credentials:  a machine credential for that host
+#               + "EE Definitions GitLab Token"  (writes to GitLab)
+#               + "EE Definitions GitHub Mirror" (reads from GitHub)
+#
+# Why this exists: the portal pushes as the signed-in person, through the
+# integration configured on the appliance. Until that configuration names
+# GitLab, the portal publishes to GitHub, and GitHub cannot reach the event
+# stream to say so, because AAP's hostname resolves to a private address from
+# outside. Polling from inside the lab is the way round that: nothing has to
+# reach in.
+#
+# This is a bridge, not the destination. Once the appliance publishes straight
+# to GitLab, disable the schedule: leaving both running means every definition
+# arrives twice.
+#
+# Only what changed since the last run is carried over, so the repository's
+# history does not rebuild itself on the first pass. The first run records
+# where GitHub is and does nothing else.
+- name: Mirror merged definitions from GitHub to GitLab
+  hosts: "{{ mirror_host | default('ee-builder') }}"
+  become: true
+  gather_facts: false
+
+  vars:
+    mirror_github_token: ""
+    ee_git_token: ""
+    mirror_github_repo: ""
+    mirror_github_api: https://api.github.com
+    mirror_gitlab_url: ""
+    mirror_gitlab_project: ""
+    mirror_branch: main
+    # Where the last mirrored commit is remembered. One file, one line.
+    mirror_state_file: /var/lib/ee-mirror/last_sha
+    # The portal writes a CI workflow of its own and keeps its saved template
+    # under .portal. Neither belongs in GitLab: the preset there is the
+    # GitLab-flavoured one, and copying GitHub's over it would undo that.
+    mirror_exclude_dirs:
+      - .github
+      - .portal
+    # A first run with no state would otherwise carry the whole repository
+    # across and start a build for every definition in it.
+    mirror_prime_only_on_first_run: true
+
+  tasks:
+    - name: Check the required variables
+      ansible.builtin.assert:
+        that:
+          - mirror_github_repo | default('', true) | length > 0
+          - mirror_gitlab_url | default('', true) | length > 0
+          - mirror_gitlab_project | default('', true) | length > 0
+          - mirror_github_token | default('', true) | length > 0
+          - ee_git_token | default('', true) | length > 0
+        fail_msg: >-
+          mirror_github_repo, mirror_gitlab_url, mirror_gitlab_project and both
+          tokens are required.
+
+    - name: Work out the GitLab endpoints
+      ansible.builtin.set_fact:
+        _gl_api: >-
+          {{ (mirror_gitlab_url | regex_replace('/$', ''))
+             ~ '/api/v4/projects/'
+             ~ (mirror_gitlab_project | urlencode | regex_replace('/', '%2F')) }}
+        _gh_headers:
+          Authorization: "Bearer {{ mirror_github_token }}"
+          Accept: application/vnd.github+json
+          X-GitHub-Api-Version: "2022-11-28"
+      no_log: true
+
+    - name: Make sure the state directory is there
+      ansible.builtin.file:
+        path: "{{ mirror_state_file | dirname }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0750"
+
+    - name: Read where GitHub was last time
+      ansible.builtin.slurp:
+        src: "{{ mirror_state_file }}"
+      register: _state
+      failed_when: false
+
+    - name: Note it
+      ansible.builtin.set_fact:
+        _last: >-
+          {{ (_state.content | b64decode | trim)
+             if _state.content is defined else '' }}
+
+    - name: Ask GitHub where {{ mirror_branch }} is now
+      ansible.builtin.uri:
+        url: "{{ mirror_github_api }}/repos/{{ mirror_github_repo }}/commits/{{ mirror_branch }}"
+        headers: "{{ _gh_headers }}"
+        status_code: [200]
+      register: _head
+      changed_when: false
+      no_log: true
+
+    - name: Note that, and what the commit says
+      ansible.builtin.set_fact:
+        _head_sha: "{{ _head.json.sha }}"
+        _head_subject: "{{ (_head.json.commit.message | default('')).split('\n') | first }}"
+
+    - name: Record the starting point and stop, on a first run
+      when:
+        - _last | length == 0
+        - mirror_prime_only_on_first_run | bool
+      block:
+        - name: Write it down
+          ansible.builtin.copy:
+            dest: "{{ mirror_state_file }}"
+            content: "{{ _head_sha }}\n"
+            owner: root
+            group: root
+            mode: "0640"
+
+        - name: Say so
+          ansible.builtin.debug:
+            msg: >-
+              First run: recorded {{ _head_sha[:7] }} as the starting point.
+              Anything pushed to GitHub from now on will be carried across.
+
+        - name: End the play
+          ansible.builtin.meta: end_play
+
+    - name: Stop when nothing has moved
+      when: _last == _head_sha
+      block:
+        - name: Say so
+          ansible.builtin.debug:
+            msg: "GitHub is still at {{ _head_sha[:7] }}; nothing to carry across."
+
+        - name: End the play
+          ansible.builtin.meta: end_play
+
+    - name: Ask GitHub what changed
+      ansible.builtin.uri:
+        url: >-
+          {{ mirror_github_api }}/repos/{{ mirror_github_repo }}/compare/{{ _last }}...{{ _head_sha }}
+        headers: "{{ _gh_headers }}"
+        status_code: [200, 404]
+      register: _compare
+      changed_when: false
+      no_log: true
+
+    # A force-push, or a commit that has been garbage collected, makes the
+    # comparison impossible. Re-priming is the honest response: carrying the
+    # whole repository across instead would start a build for every definition.
+    - name: Re-record the starting point when the history has been rewritten
+      when: _compare.status != 200
+      block:
+        - name: Write it down
+          ansible.builtin.copy:
+            dest: "{{ mirror_state_file }}"
+            content: "{{ _head_sha }}\n"
+            owner: root
+            group: root
+            mode: "0640"
+
+        - name: Say what happened
+          ansible.builtin.debug:
+            msg: >-
+              GitHub cannot compare {{ _last[:7] }} with {{ _head_sha[:7] }}, so
+              the history was rewritten. Recorded {{ _head_sha[:7] }} as the new
+              starting point; anything missed will have to be pushed again.
+
+        - name: End the play
+          ansible.builtin.meta: end_play
+
+    - name: Keep the definition files that were added or changed
+      ansible.builtin.set_fact:
+        _files: >-
+          {{ _compare.json.files | default([])
+             | selectattr('status', 'in', ['added', 'modified', 'changed', 'renamed'])
+             | map(attribute='filename')
+             | select('search', '/')
+             | reject('search', '^(' ~ (mirror_exclude_dirs | map('regex_escape') | join('|')) ~ ')/')
+             | list }}
+
+    - name: Stop when none of them are ours
+      when: _files | length == 0
+      block:
+        - name: Say so
+          ansible.builtin.debug:
+            msg: >-
+              {{ _compare.json.files | default([]) | length }} file(s) changed on
+              GitHub between {{ _last[:7] }} and {{ _head_sha[:7] }}, none of
+              them under a definition directory.
+
+        - name: Remember where we got to
+          ansible.builtin.copy:
+            dest: "{{ mirror_state_file }}"
+            content: "{{ _head_sha }}\n"
+            owner: root
+            group: root
+            mode: "0640"
+
+        - name: End the play
+          ansible.builtin.meta: end_play
+
+    - name: Read each of them from GitHub
+      ansible.builtin.uri:
+        url: >-
+          {{ mirror_github_api }}/repos/{{ mirror_github_repo }}/contents/{{ item | urlencode }}?ref={{ _head_sha }}
+        headers: "{{ _gh_headers }}"
+        status_code: [200]
+      loop: "{{ _files }}"
+      register: _fetched
+      changed_when: false
+      no_log: true
+
+    - name: Ask GitLab which of them it already has
+      ansible.builtin.uri:
+        url: >-
+          {{ _gl_api }}/repository/files/{{ item | urlencode | regex_replace('/', '%2F') }}?ref={{ mirror_branch }}
+        headers:
+          PRIVATE-TOKEN: "{{ ee_git_token }}"
+        status_code: [200, 404]
+      loop: "{{ _files }}"
+      register: _existing
+      changed_when: false
+      no_log: true
+
+    # GitHub hands back base64 with newlines in it, which GitLab will not take.
+    - name: Build one commit out of them
+      ansible.builtin.set_fact:
+        _actions: >-
+          {{ _actions | default([]) + [{
+               'action': 'update' if _existing.results[_idx].status == 200 else 'create',
+               'file_path': item,
+               'encoding': 'base64',
+               'content': _fetched.results[_idx].json.content | regex_replace('\s', ''),
+             }] }}
+      loop: "{{ _files }}"
+      loop_control:
+        index_var: _idx
+      no_log: true
+
+    - name: Push it to GitLab
+      ansible.builtin.uri:
+        url: "{{ _gl_api }}/repository/commits"
+        method: POST
+        headers:
+          PRIVATE-TOKEN: "{{ ee_git_token }}"
+        body_format: json
+        body:
+          branch: "{{ mirror_branch }}"
+          commit_message: |-
+            {{ _head_subject }}
+
+            Mirrored from {{ mirror_github_repo }} at {{ _head_sha[:7] }}, which is
+            where the automation portal publishes. {{ _files | length }} file(s).
+          actions: "{{ _actions }}"
+        status_code: [201]
+      register: _pushed
+      no_log: true
+
+    - name: Remember where we got to
+      ansible.builtin.copy:
+        dest: "{{ mirror_state_file }}"
+        content: "{{ _head_sha }}\n"
+        owner: root
+        group: root
+        mode: "0640"
+
+    - name: Publish the result
+      ansible.builtin.set_stats:
+        aggregate: false
+        per_host: false
+        data:
+          mirror_result: pushed
+          mirror_files: "{{ _files | length }}"
+          mirror_github_sha: "{{ _head_sha }}"
+          mirror_gitlab_sha: "{{ _pushed.json.id | default('') }}"
+
+    - name: Say what happened
+      ansible.builtin.debug:
+        msg: >-
+          Carried {{ _files | length }} file(s) across as
+          {{ (_pushed.json.id | default(''))[:7] }}:
+          {{ _files | join(', ') }}.
+          That push is what starts the build.
