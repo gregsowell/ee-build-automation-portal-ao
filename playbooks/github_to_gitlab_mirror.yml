@@ -15,6 +15,10 @@
 # outside. Polling from inside the lab is the way round that: nothing has to
 # reach in.
 #
+# The portal's own pull requests are merged here too, rather than by a GitHub
+# Actions workflow, so nothing executes on GitHub at all: it is reduced to a
+# repository the portal writes to and this job reads.
+#
 # This is a bridge, not the destination. Once the appliance publishes straight
 # to GitLab, disable the schedule: leaving both running means every definition
 # arrives twice.
@@ -43,6 +47,11 @@
     mirror_exclude_dirs:
       - .github
       - .portal
+    # The portal titles every one of its pull requests the same way. Matching
+    # on it is what separates them from everyone else's.
+    mirror_pr_title_prefix: "[AAP] Adds/updates files for Execution Environment"
+    mirror_merge_pull_requests: true
+    mirror_merge_method: squash
     # A first run with no state would otherwise carry the whole repository
     # across and start a build for every definition in it.
     mirror_prime_only_on_first_run: true
@@ -91,6 +100,60 @@
         _last: >-
           {{ (_state.content | b64decode | trim)
              if _state.content is defined else '' }}
+
+    # Merging is what puts a definition on the branch, and the portal cannot do
+    # it itself. Doing it from here keeps GitHub inert: no Actions workflow,
+    # no runner, nothing on the hosted side that has to work for a build to
+    # happen.
+    - name: Find the portal's open pull requests
+      when: mirror_merge_pull_requests | bool
+      ansible.builtin.uri:
+        url: >-
+          {{ mirror_github_api }}/repos/{{ mirror_github_repo }}/pulls?state=open&base={{ mirror_branch }}&per_page=50
+        headers: "{{ _gh_headers }}"
+        status_code: [200]
+      register: _pulls
+      changed_when: false
+      no_log: true
+
+    - name: Keep the ones the portal raised
+      when: mirror_merge_pull_requests | bool
+      ansible.builtin.set_fact:
+        _portal_pulls: >-
+          {{ _pulls.json | default([])
+             | rejectattr('draft', 'equalto', true)
+             | selectattr('title', 'match', mirror_pr_title_prefix | regex_escape)
+             | selectattr('head.repo.full_name', 'equalto', mirror_github_repo)
+             | list }}
+
+    - name: Merge them
+      when:
+        - mirror_merge_pull_requests | bool
+        - _portal_pulls | default([]) | length > 0
+      ansible.builtin.uri:
+        url: >-
+          {{ mirror_github_api }}/repos/{{ mirror_github_repo }}/pulls/{{ item.number }}/merge
+        method: PUT
+        headers: "{{ _gh_headers }}"
+        body_format: json
+        body:
+          merge_method: "{{ mirror_merge_method }}"
+          commit_title: "{{ item.title }}"
+        status_code: [200, 405, 409]
+      loop: "{{ _portal_pulls | default([]) }}"
+      loop_control:
+        label: "#{{ item.number }} {{ item.title }}"
+      register: _merged_pulls
+      no_log: true
+
+    - name: Say which were merged
+      when: mirror_merge_pull_requests | bool
+      ansible.builtin.debug:
+        msg: >-
+          {{ (_portal_pulls | default([]) | length) }} portal pull request(s) open;
+          {{ (_merged_pulls.results | default([]) | selectattr('status', 'equalto', 200) | list | length) }}
+          merged, {{ (_merged_pulls.results | default([]) | rejectattr('status', 'equalto', 200) | list | length) }}
+          left alone because GitHub refused them.
 
     - name: Ask GitHub where {{ mirror_branch }} is now
       ansible.builtin.uri:
