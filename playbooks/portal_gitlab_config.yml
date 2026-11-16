@@ -192,11 +192,13 @@
           with a timestamp; put it back before restarting the portal.
       no_log: true
 
+    # The appliance's ansible-portal CLI has status, backup and restore but no
+    # restart; the portal itself is an ordinary systemd unit.
     - name: Restart the portal
-      ansible.builtin.command:
-        cmd: ansible-portal restart
+      ansible.builtin.systemd_service:
+        name: "{{ portal_service | default('portal.service') }}"
+        state: restarted
       when: portal_restart | bool
-      changed_when: true
 
     # The portal answers 404 for an auth provider it does not know and 400 for
     # one it does, and it answers 404 for a minute after a restart while the
