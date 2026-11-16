@@ -96,6 +96,13 @@
       ansible.builtin.set_fact:
         _cfg: "{{ _cfg_raw.content | b64decode | from_yaml }}"
 
+    # The portal runs as its own user and reads this file as that user, so the
+    # rewrite keeps whatever owner and mode the appliance shipped it with.
+    - name: Note who owns the configuration
+      ansible.builtin.stat:
+        path: "{{ portal_config }}"
+      register: _cfg_stat
+
     - name: Keep a copy of what is there now
       ansible.builtin.copy:
         src: "{{ portal_config }}"
@@ -158,9 +165,9 @@
       ansible.builtin.copy:
         dest: "{{ portal_config }}"
         content: "{{ _merged | to_nice_yaml(indent=2, width=200) }}"
-        owner: root
-        group: root
-        mode: "0600"
+        owner: "{{ _cfg_stat.stat.pw_name }}"
+        group: "{{ _cfg_stat.stat.gr_name }}"
+        mode: "{{ _cfg_stat.stat.mode }}"
       register: _written
       no_log: true
 
