@@ -435,6 +435,45 @@ curl -sk -X POST "$EVENT_STREAM_URL"   -H 'Content-Type: application/json' -H 'X
 A `200` and an incremented `events_received` mean the rest of the chain is
 healthy and the only fault was reachability.
 
+### When the forge cannot reach the event stream at all
+
+Moving to an in-lab forge is the real fix, but the portal publishes to
+whichever forge its appliance is configured for, and changing that needs root
+on the appliance. Until then the definitions can be fetched instead of
+delivered, which needs nothing to reach inward:
+
+```
+EE Build | Mirror GitHub To GitLab      playbooks/github_to_gitlab_mirror.yml
+```
+
+It merges the portal's open pull requests, asks GitHub what changed since the
+last run, carries those files into GitLab in one commit, and remembers where it
+got to in a file on the build host. That commit is an ordinary push, so the
+chain starts exactly as it would have. Schedule it every couple of minutes.
+
+Merging here rather than in a GitHub Actions workflow is the point: **disable
+the Actions workflows in the definitions repository**, both the auto-merge one
+from Phase 11 and the portal's own `ee-build.yml`. Nothing then executes on the
+hosted forge. It is reduced to a repository the portal writes to and this job
+reads, which is as close to not using it as you can get while the appliance
+still points there.
+
+Three things to know before relying on it:
+
+- **The first run does nothing but record where GitHub is.** Otherwise every
+  definition already in the repository would be carried across at once, and
+  each would start a build.
+- **Only the difference is carried.** A rewritten history makes the comparison
+  impossible, and the job re-records its position rather than guessing;
+  anything missed has to be pushed again.
+- **It is one-way, so the two drift.** An approved agent fix is written back to
+  GitLab, where the build ran, and GitHub keeps the definition that failed. If
+  the portal republishes that execution environment, the failing version comes
+  across again and is repaired again.
+
+Take the schedule off once the portal publishes to the in-lab forge directly,
+or every definition arrives twice.
+
 ### The build fails
 
 | Symptom | Cause | Fix |
