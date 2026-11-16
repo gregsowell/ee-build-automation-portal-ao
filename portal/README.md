@@ -81,10 +81,15 @@ auth:
 catalog:
   locations:
     - type: url
-      target: <gitlab-url>/<group>/<project>/-/raw/main/.portal/ee-builder-preset.yaml
+      target: <gitlab-url>/<group>/<project>/-/blob/main/.portal/ee-builder-preset.yaml
       rules:
         - allow: [Template]
 ```
+
+Use the `/-/blob/` form of the link, not `/-/raw/`. The portal reads it through
+the GitLab integration, which refuses any URL without `/blob/` in it ("Failed
+extracting project path"), and without the integration a raw link to a private
+project only gets a redirect to the sign-in page.
 
 `audience` is what makes the Backstage GitLab provider talk to a self-hosted
 instance instead of gitlab.com. Keep the existing `auth.providers.rhaap`

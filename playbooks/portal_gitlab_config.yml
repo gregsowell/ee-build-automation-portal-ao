@@ -82,10 +82,13 @@
         _gl_base: "{{ gitlab_external_url | regex_replace('/$', '') }}"
         _gl_host: "{{ gitlab_external_url | regex_replace('^https?://', '') | regex_replace('/$', '') }}"
 
+    # The portal reads this through the GitLab integration, which only accepts
+    # the /-/blob/ form of a file link; a /-/raw/ link fails with "Url path
+    # must include /blob/".
     - name: Work out where the builder template lives
       ansible.builtin.set_fact:
         _preset_url: >-
-          {{ _gl_base }}/{{ gitlab_group }}/{{ gitlab_project }}/-/raw/main/{{ portal_preset_path }}
+          {{ _gl_base }}/{{ gitlab_group }}/{{ gitlab_project }}/-/blob/main/{{ portal_preset_path }}
 
     - name: Read the portal's configuration
       ansible.builtin.slurp:
