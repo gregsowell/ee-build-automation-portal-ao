@@ -49,10 +49,16 @@
     # portal's is decided by the job, which can read the title, the author and
     # the project; the condition here only narrows it to ones still open
     # against the build branch.
+    #
+    # No "update": GitLab sends one while the first job is merging, and the
+    # rulebook runs its actions one at a time. That second job found nothing
+    # to do, and the push that starts the build waited about 20 seconds behind
+    # it. A merge request that stays open because a merge failed can be closed
+    # and reopened to try again.
     - name: A portal merge request is merged for you
       condition: >-
         event.payload.object_kind == "merge_request" and
-        event.payload.object_attributes.action in ["open", "reopen", "update"] and
+        event.payload.object_attributes.action in ["open", "reopen"] and
         event.payload.object_attributes.state == "opened" and
         event.payload.object_attributes.target_branch == "main"
       action:

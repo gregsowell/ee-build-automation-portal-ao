@@ -297,7 +297,12 @@
           scm_type: git
           scm_url: "{{ ee_repo_scm_url }}"
           scm_branch: "{{ ee_project_branch }}"
+          # A chain launches four or five jobs back to back, and a sync on
+          # every one adds six or seven seconds each. With a cache window only
+          # the first job in a chain syncs. A playbook change is picked up
+          # within the window, or straight away with a manual sync.
           scm_update_on_launch: true
+          scm_update_cache_timeout: "{{ ee_project_cache_seconds | default(1800) | int }}"
           scm_clean: true
       ansible.builtin.include_tasks: tasks/upsert.yml
 
