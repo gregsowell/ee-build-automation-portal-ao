@@ -7,15 +7,13 @@
 # somewhere the portal can read, and register it under catalog.locations.
 # See portal/README.md.
 #
-# The person ordering never touches source control. The target is fixed and
-# shown read-only instead of through Red Hat's ScmSelector, which looks up
-# namespaces from the browser and asks every user to sign in to the forge. The
-# publish steps carry no token, so they run with the portal's own
-# integrations.<forge> token, and the merge request records who asked for it.
-#
-# The target sits on sourceControlProvider's sub-properties rather than on the
-# object: a default on the object itself is not applied to a field inside a
-# dependencies branch.
+# The person ordering never touches source control. The publishing target is
+# not a form field at all: it is written into the steps below, in place of Red
+# Hat's ScmSelector, which looks up namespaces from the browser and asks every
+# user to sign in to the forge. The publish steps carry no token, so they run
+# with the portal's own integrations.<forge> token, and the merge request
+# records who asked for it. The forge build option (GitHub Actions, GitLab
+# pipeline) is gone too: merging is what builds.
 #
 # Derived from ansible/ansible-rhdh-templates v2.0.1.
 apiVersion: scaffolder.backstage.io/v1beta3
@@ -261,228 +259,16 @@ spec:
           help: Add one or more tags for the generated template.
       publishAndBuild:
         title: Publish and Build
+        description: The definition is published to CHANGEME_SCM_OWNER/CHANGEME_DEFINITIONS_REPO, and the
+          image is built and added to the platform automatically.
         type: object
         properties:
           publishToSCM:
-            title: Publish to a Git repository
+            title: Publish and build
             type: boolean
             default: true
-            ui:help: If unchecked, the generated files will not be pushed to a Git repository and you
-              will get a link to download the files locally.
-        dependencies:
-          publishToSCM:
-            oneOf:
-            - properties:
-                publishToSCM:
-                  const: true
-                sourceControlProvider:
-                  title: Publishing target
-                  description: The definition is published here and the image is built and
-                    added to the platform automatically.
-                  type: object
-                  properties:
-                    provider:
-                      type: string
-                      default: CHANGEME_SCM_PROVIDER
-                      ui:widget: hidden
-                    providerLabel:
-                      type: string
-                      default: CHANGEME_SCM_LABEL
-                      ui:widget: hidden
-                    org:
-                      title: Namespace
-                      type: string
-                      default: CHANGEME_SCM_OWNER
-                      ui:readonly: true
-                    repoName:
-                      title: Repository
-                      type: string
-                      default: CHANGEME_DEFINITIONS_REPO
-                      ui:readonly: true
-                    repoExists:
-                      type: boolean
-                      default: true
-                      ui:widget: hidden
-              required:
-              - sourceControlProvider
-              dependencies:
-                sourceControlProvider:
-                  oneOf:
-                  - properties:
-                      sourceControlProvider:
-                        properties:
-                          provider:
-                            const: github
-                      buildExecutionEnvironment:
-                        title: Build Execution Environment
-                        description: Trigger a build of the Execution Environment after publishing.
-                        type: boolean
-                        default: false
-                        ui:help: If checked, the Execution Environment will be built and pushed to the
-                          selected container registry.
-                    dependencies:
-                      buildExecutionEnvironment:
-                        oneOf:
-                        - properties:
-                            buildExecutionEnvironment:
-                              const: true
-                            buildRegistry:
-                              title: Registry
-                              description: Container registry to push the built EE image to.
-                              type: string
-                              default: Private Automation Hub (PAH)
-                              enum:
-                              - Private Automation Hub (PAH)
-                              - Custom Registry
-                              ui:widget: select
-                              ui:help: Select the container registry where the built image will be pushed.
-                          required:
-                          - buildRegistry
-                          - buildImageName
-                          - buildImageTag
-                          dependencies:
-                            buildRegistry:
-                              oneOf:
-                              - properties:
-                                  buildRegistry:
-                                    const: Private Automation Hub (PAH)
-                                  buildImageName:
-                                    title: Image Name
-                                    type: string
-                                    description: Name for the built Execution Environment image in namespace/name
-                                      format. For example, 'my-namespace/my-custom-ee'.
-                                  buildImageTag:
-                                    title: Image Tag
-                                    type: string
-                                    description: Tag for the built Execution Environment image.
-                                  registryTlsVerify:
-                                    title: Verify TLS certificates
-                                    type: boolean
-                                    default: true
-                                    description: Verify TLS certificates when interacting with container
-                                      registries.
-                                    ui:help: Uncheck to disable TLS verification for registries using
-                                      self-signed or untrusted certificates.
-                              - properties:
-                                  buildRegistry:
-                                    const: Custom Registry
-                                  customRegistryUrl:
-                                    title: Custom Registry URL
-                                    type: string
-                                    description: URL of the custom container registry (e.g., quay.io,
-                                      docker.io).
-                                    ui:help: Provide the full URL of the container registry.
-                                  buildImageName:
-                                    title: Image Name
-                                    type: string
-                                    description: Name for the built Execution Environment image in namespace/name
-                                      format. For example, 'my-namespace/my-custom-ee'.
-                                  buildImageTag:
-                                    title: Image Tag
-                                    type: string
-                                    description: Tag for the built Execution Environment image.
-                                  registryTlsVerify:
-                                    title: Verify TLS certificates
-                                    type: boolean
-                                    default: true
-                                    description: Verify TLS certificates when interacting with container
-                                      registries.
-                                    ui:help: Uncheck to disable TLS verification for registries using
-                                      self-signed or untrusted certificates.
-                                required:
-                                - customRegistryUrl
-                        - properties:
-                            buildExecutionEnvironment:
-                              const: false
-                  - properties:
-                      sourceControlProvider:
-                        properties:
-                          provider:
-                            const: gitlab
-                      buildExecutionEnvironment:
-                        title: Build Execution Environment
-                        description: Trigger a build of the Execution Environment after publishing.
-                        type: boolean
-                        default: false
-                        ui:help: If checked, the Execution Environment will be built and pushed to the
-                          selected container registry.
-                    dependencies:
-                      buildExecutionEnvironment:
-                        oneOf:
-                        - properties:
-                            buildExecutionEnvironment:
-                              const: true
-                            buildRegistry:
-                              title: Registry
-                              description: Container registry to push the built EE image to.
-                              type: string
-                              default: Private Automation Hub (PAH)
-                              enum:
-                              - Private Automation Hub (PAH)
-                              - Custom Registry
-                              ui:widget: select
-                              ui:help: Select the container registry where the built image will be pushed.
-                          required:
-                          - buildRegistry
-                          - buildImageName
-                          - buildImageTag
-                          dependencies:
-                            buildRegistry:
-                              oneOf:
-                              - properties:
-                                  buildRegistry:
-                                    const: Private Automation Hub (PAH)
-                                  buildImageName:
-                                    title: Image Name
-                                    type: string
-                                    description: Name for the built Execution Environment image in namespace/name
-                                      format. For example, 'my-namespace/my-custom-ee'.
-                                  buildImageTag:
-                                    title: Image Tag
-                                    type: string
-                                    description: Tag for the built Execution Environment image.
-                                  registryTlsVerify:
-                                    title: Verify TLS certificates
-                                    type: boolean
-                                    default: true
-                                    description: Verify TLS certificates when interacting with container
-                                      registries.
-                                    ui:help: Uncheck to disable TLS verification for registries using
-                                      self-signed or untrusted certificates.
-                              - properties:
-                                  buildRegistry:
-                                    const: Custom Registry
-                                  customRegistryUrl:
-                                    title: Custom Registry URL
-                                    type: string
-                                    description: URL of the custom container registry (e.g., quay.io,
-                                      docker.io).
-                                    ui:help: Provide the full URL of the container registry.
-                                  buildImageName:
-                                    title: Image Name
-                                    type: string
-                                    description: Name for the built Execution Environment image in namespace/name
-                                      format. For example, 'my-namespace/my-custom-ee'.
-                                  buildImageTag:
-                                    title: Image Tag
-                                    type: string
-                                    description: Tag for the built Execution Environment image.
-                                  registryTlsVerify:
-                                    title: Verify TLS certificates
-                                    type: boolean
-                                    default: true
-                                    description: Verify TLS certificates when interacting with container
-                                      registries.
-                                    ui:help: Uncheck to disable TLS verification for registries using
-                                      self-signed or untrusted certificates.
-                                required:
-                                - customRegistryUrl
-                        - properties:
-                            buildExecutionEnvironment:
-                              const: false
-            - properties:
-                publishToSCM:
-                  const: false
+            ui:help: If unchecked, nothing is published or built, and you get a link to download the
+              generated files instead.
     required:
     - eeFileName
     - templateDescription
@@ -510,7 +296,7 @@ spec:
         buildImageName: ${{ parameters.publishAndBuild.buildImageName or '' }}
         buildImageTag: ${{ parameters.publishAndBuild.buildImageTag or '' }}
         registryTlsVerify: ${{ parameters.publishAndBuild.registryTlsVerify }}
-        scmProvider: ${{ parameters.publishAndBuild.sourceControlProvider.provider or 'github' }}
+        scmProvider: ${{ 'CHANGEME_SCM_PROVIDER' or 'github' }}
   - id: prepare-publish
     action: ansible:prepare:publish
     name: Prepare for publishing
@@ -519,12 +305,12 @@ spec:
     # and fails on a self-hosted instance ("Repository ... does not exist").
     # The GitLab steps below build the same values from the form and the host
     # this template names.
-    if: ${{ parameters.publishAndBuild.publishToSCM and parameters.publishAndBuild.sourceControlProvider.provider == 'github' }}
+    if: ${{ parameters.publishAndBuild.publishToSCM and 'CHANGEME_SCM_PROVIDER' == 'github' }}
     input:
-      sourceControlProvider: ${{ parameters.publishAndBuild.sourceControlProvider.provider }}
-      repositoryOwner: ${{ parameters.publishAndBuild.sourceControlProvider.org }}
-      repositoryName: ${{ parameters.publishAndBuild.sourceControlProvider.repoName }}
-      createNewRepository: ${{ not parameters.publishAndBuild.sourceControlProvider.repoExists }}
+      sourceControlProvider: ${{ 'CHANGEME_SCM_PROVIDER' }}
+      repositoryOwner: ${{ 'CHANGEME_SCM_OWNER' }}
+      repositoryName: ${{ 'CHANGEME_DEFINITIONS_REPO' }}
+      createNewRepository: ${{ not true }}
       eeFileName: ${{ parameters.eeFileName }}
       contextDirName: ${{ steps['create-ee-definition'].output.contextDirName }}
   - id: create-catalog-info-file
@@ -542,8 +328,8 @@ spec:
           tags: ${{ parameters.tags or [] }}
           annotations:
             backstage.io/techdocs-ref: dir:.
-            backstage.io/managed-by-location: ${{ steps['prepare-publish'].output.generatedRepoUrl if parameters.publishAndBuild.sourceControlProvider.provider == 'github' else ('CHANGEME_SCM_HOST?repo=' ~ parameters.publishAndBuild.sourceControlProvider.repoName ~ '&owner=' ~ parameters.publishAndBuild.sourceControlProvider.org) }}
-            ansible.io/scm-provider: ${{ parameters.publishAndBuild.sourceControlProvider.provider }}
+            backstage.io/managed-by-location: ${{ steps['prepare-publish'].output.generatedRepoUrl if 'CHANGEME_SCM_PROVIDER' == 'github' else ('CHANGEME_SCM_HOST?repo=' ~ 'CHANGEME_DEFINITIONS_REPO' ~ '&owner=' ~ 'CHANGEME_SCM_OWNER') }}
+            ansible.io/scm-provider: ${{ 'CHANGEME_SCM_PROVIDER' }}
         spec:
           type: execution-environment
           owner: ${{ steps['create-ee-definition'].output.owner }}
@@ -551,8 +337,8 @@ spec:
   - id: publish-github
     name: Create and publish to a new GitHub Repository
     action: publish:github
-    if: ${{ (parameters.publishAndBuild.publishToSCM) and (not parameters.publishAndBuild.sourceControlProvider.repoExists)
-      and (parameters.publishAndBuild.sourceControlProvider.provider == 'github') }}
+    if: ${{ (parameters.publishAndBuild.publishToSCM) and (not true)
+      and ('CHANGEME_SCM_PROVIDER' == 'github') }}
     input:
       description: ${{ parameters.templateDescription }}
       repoUrl: ${{ steps['prepare-publish'].output.generatedRepoUrl }}
@@ -561,17 +347,17 @@ spec:
   - id: publish-gitlab
     name: Create and publish to a new GitLab Repository
     action: publish:gitlab
-    if: ${{ (parameters.publishAndBuild.publishToSCM) and (not parameters.publishAndBuild.sourceControlProvider.repoExists)
-      and (parameters.publishAndBuild.sourceControlProvider.provider == 'gitlab') }}
+    if: ${{ (parameters.publishAndBuild.publishToSCM) and (not true)
+      and ('CHANGEME_SCM_PROVIDER' == 'gitlab') }}
     input:
-      repoUrl: CHANGEME_SCM_HOST?repo=${{ parameters.publishAndBuild.sourceControlProvider.repoName }}&owner=${{ parameters.publishAndBuild.sourceControlProvider.org }}
+      repoUrl: CHANGEME_SCM_HOST?repo=${{ 'CHANGEME_DEFINITIONS_REPO' }}&owner=${{ 'CHANGEME_SCM_OWNER' }}
       defaultBranch: main
       repoVisibility: public
   - id: publish-github-pull-request
     name: Publish generated files as a Github Pull Request
     action: publish:github:pull-request
-    if: ${{ parameters.publishAndBuild.publishToSCM and (parameters.publishAndBuild.sourceControlProvider.repoExists)
-      and (parameters.publishAndBuild.sourceControlProvider.provider == 'github') }}
+    if: ${{ parameters.publishAndBuild.publishToSCM and (true)
+      and ('CHANGEME_SCM_PROVIDER' == 'github') }}
     input:
       repoUrl: ${{ steps['prepare-publish'].output.generatedRepoUrl }}
       branchName: ${{ steps['prepare-publish'].output.generatedBranchName }}
@@ -580,10 +366,10 @@ spec:
   - id: publish-gitlab-merge-request
     name: Publish generated files as a Gitlab Merge Request
     action: publish:gitlab:merge-request
-    if: ${{ parameters.publishAndBuild.publishToSCM and (parameters.publishAndBuild.sourceControlProvider.repoExists)
-      and (parameters.publishAndBuild.sourceControlProvider.provider == 'gitlab') }}
+    if: ${{ parameters.publishAndBuild.publishToSCM and (true)
+      and ('CHANGEME_SCM_PROVIDER' == 'gitlab') }}
     input:
-      repoUrl: CHANGEME_SCM_HOST?repo=${{ parameters.publishAndBuild.sourceControlProvider.repoName }}&owner=${{ parameters.publishAndBuild.sourceControlProvider.org }}
+      repoUrl: CHANGEME_SCM_HOST?repo=${{ 'CHANGEME_DEFINITIONS_REPO' }}&owner=${{ 'CHANGEME_SCM_OWNER' }}
       branchName: portal-${{ parameters.eeFileName | lower }}
       title: '[AAP] Adds/updates files for Execution Environment ${{ parameters.eeFileName }}'
       description: Execution Environment files generated by the Ansible automation portal for ${{ user.ref or 'an unknown user' }}.
@@ -592,12 +378,12 @@ spec:
     action: catalog:register
     if: ${{ parameters.publishAndBuild.publishToSCM }}
     input:
-      catalogInfoUrl: ${{ steps['prepare-publish'].output.generatedCatalogInfoUrl if parameters.publishAndBuild.sourceControlProvider.provider == 'github' else (('https://CHANGEME_SCM_HOST/' ~ parameters.publishAndBuild.sourceControlProvider.org ~ '/' ~ parameters.publishAndBuild.sourceControlProvider.repoName) ~ '/-/blob/main/' ~ steps['create-ee-definition'].output.contextDirName ~ '/catalog-info.yaml') }}
+      catalogInfoUrl: ${{ steps['prepare-publish'].output.generatedCatalogInfoUrl if 'CHANGEME_SCM_PROVIDER' == 'github' else (('https://CHANGEME_SCM_HOST/' ~ 'CHANGEME_SCM_OWNER' ~ '/' ~ 'CHANGEME_DEFINITIONS_REPO') ~ '/-/blob/main/' ~ steps['create-ee-definition'].output.contextDirName ~ '/catalog-info.yaml') }}
       optional: true
   - id: dispatch-ee-build
     action: github:actions:dispatch
     name: Start EE Build Workflow
-    if: ${{ parameters.publishAndBuild.buildExecutionEnvironment and parameters.publishAndBuild.sourceControlProvider.provider
+    if: ${{ parameters.publishAndBuild.buildExecutionEnvironment and 'CHANGEME_SCM_PROVIDER'
       == 'github' }}
     input:
       repoUrl: ${{ steps['prepare-publish'].output.generatedRepoUrl }}
@@ -615,25 +401,25 @@ spec:
 
         '
     links:
-    - title: ${{ parameters.publishAndBuild.sourceControlProvider.providerLabel }} Repository
-      url: ${{ steps['prepare-publish'].output.generatedFullRepoUrl if parameters.publishAndBuild.sourceControlProvider.provider == 'github' else ('https://CHANGEME_SCM_HOST/' ~ parameters.publishAndBuild.sourceControlProvider.org ~ '/' ~ parameters.publishAndBuild.sourceControlProvider.repoName) }}
-      if: ${{ (parameters.publishAndBuild.publishToSCM) and (not parameters.publishAndBuild.sourceControlProvider.repoExists)
+    - title: ${{ 'CHANGEME_SCM_LABEL' }} Repository
+      url: ${{ steps['prepare-publish'].output.generatedFullRepoUrl if 'CHANGEME_SCM_PROVIDER' == 'github' else ('https://CHANGEME_SCM_HOST/' ~ 'CHANGEME_SCM_OWNER' ~ '/' ~ 'CHANGEME_DEFINITIONS_REPO') }}
+      if: ${{ (parameters.publishAndBuild.publishToSCM) and (not true)
         }}
-      icon: ${{ parameters.publishAndBuild.sourceControlProvider.provider }}
+      icon: ${{ 'CHANGEME_SCM_PROVIDER' }}
     - title: GitHub Pull Request
       url: ${{ steps['publish-github-pull-request'].output.remoteUrl }}
-      if: ${{ (parameters.publishAndBuild.publishToSCM) and (parameters.publishAndBuild.sourceControlProvider.repoExists)
-        and (parameters.publishAndBuild.sourceControlProvider.provider == 'github') }}
+      if: ${{ (parameters.publishAndBuild.publishToSCM) and (true)
+        and ('CHANGEME_SCM_PROVIDER' == 'github') }}
       icon: github
-    - title: ${{ parameters.publishAndBuild.sourceControlProvider.providerLabel }} EE Build Workflow Run
+    - title: ${{ 'CHANGEME_SCM_LABEL' }} EE Build Workflow Run
       url: https://${{ steps['prepare-publish'].output.normalizedRepoUrl }}/actions/workflows/ee-build.yml
-      if: ${{ parameters.publishAndBuild.buildExecutionEnvironment == true and parameters.publishAndBuild.sourceControlProvider.provider
+      if: ${{ parameters.publishAndBuild.buildExecutionEnvironment == true and 'CHANGEME_SCM_PROVIDER'
         == 'github' }}
       icon: github
     - title: GitLab Merge Request
       url: ${{ steps['publish-gitlab-merge-request'].output.mergeRequestUrl }}
-      if: ${{ (parameters.publishAndBuild.publishToSCM) and (parameters.publishAndBuild.sourceControlProvider.repoExists)
-        and (parameters.publishAndBuild.sourceControlProvider.provider == 'gitlab') }}
+      if: ${{ (parameters.publishAndBuild.publishToSCM) and (true)
+        and ('CHANGEME_SCM_PROVIDER' == 'gitlab') }}
     - title: View details in catalog
       icon: catalog
       url: ${{ steps['create-ee-definition'].output.generatedEntityRef }}

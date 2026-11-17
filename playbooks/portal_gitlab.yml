@@ -163,7 +163,9 @@
           user = User.find_by_username({{ portal_token_user | to_json }})
           raise 'no portal user' if user.nil?
           name = {{ portal_token_name | to_json }}
-          user.personal_access_tokens.active.where(name: name).each(&:revoke!)
+          # Any earlier token of this name goes, including one issued to root
+          # before the portal had a user of its own.
+          PersonalAccessToken.active.where(name: name).each(&:revoke!)
           token = user.personal_access_tokens.create!(
             name: name,
             scopes: {{ portal_token_scopes.split(',') | to_json }},

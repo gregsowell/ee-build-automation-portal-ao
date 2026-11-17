@@ -195,11 +195,15 @@ The wizard is a Backstage template, so those fields take defaults.
 [`templates/ee-builder-preset.yaml`](templates/ee-builder-preset.yaml) is Red
 Hat's *start from scratch* template with two changes:
 
-- **nobody signs in to GitLab.** The publishing target is fixed and shown
-  read-only, in place of Red Hat's `ScmSelector`, which looks up namespaces
-  from the browser and asks each person to sign in to GitLab first. The
-  publish steps pass no token, so they run with the integration token from
-  step 1. The merge request description names the portal user who ordered it.
+- **nobody signs in to GitLab.** The publishing target is not on the form at
+  all: Red Hat's `ScmSelector`, which looks up namespaces from the browser and
+  asks each person to sign in to GitLab first, is gone, and the target is
+  written into the steps. The form says in one sentence where the definition
+  goes, and offers one checkbox, *Publish and build*, which can be unchecked
+  to download the files instead. The publish steps pass no token, so they run
+  with the integration token from step 1, and the merge request description
+  names the portal user who ordered it. The option to build in GitHub Actions
+  or a GitLab pipeline is gone too: merging is what builds.
 - for GitLab it skips `ansible:prepare:publish`. In the portal's 2.2.7 plugin
   that step never passes a host to its client, so for GitLab it always asks
   gitlab.com, and an order to a self-hosted instance fails with *Repository
@@ -218,9 +222,9 @@ Replace every `CHANGEME_` value:
 | `CHANGEME_SCM_OWNER` | the group | the owner |
 | `CHANGEME_DEFINITIONS_REPO` | the project name | the repository name |
 
-The target sits on `sourceControlProvider`'s sub-properties rather than on the
-object. A default on the object itself is not applied to a field inside a
-`dependencies` branch.
+Why the target is not simply a hidden, read-only field: the portal ignores
+`ui:widget: hidden` and `ui:readonly` on the target's fields, so they render as
+ordinary text boxes anyone can change.
 
 The GitHub branches of the template are kept but untested in this form: they
 also run with the integration token, so `integrations.github` needs a token
@@ -240,9 +244,8 @@ which suits cloning an existing EE rather than starting a new one.
 
 ## 5. Build a definition
 
-In the portal: **Create** > the execution environment template > fill in the
-collections, Python and system dependencies > choose to publish to source
-control, with the EE definitions project as the target.
+In the portal: **Create** > *Execution Environment (preset repository)* > fill
+in the collections, Python and system dependencies > name it > **Create**.
 
 The builder creates:
 
@@ -265,7 +268,7 @@ merged by copying the title.
 the Event-Driven Ansible event stream, which starts the Build-EE workflow in
 automation orchestrator.
 
-The builder also offers to build the image itself, in GitHub Actions or a
-GitLab pipeline (the preset drops the GitLab pipeline step). Leave that unchecked: this chain does the build on your own
-build host, against your own hub, and running both just builds everything
-twice.
+Red Hat's stock builder also offers to build the image itself, in GitHub
+Actions or a GitLab pipeline. The preset leaves that out: this chain does the
+build on your own build host, against your own hub, and running both just
+builds everything twice.
