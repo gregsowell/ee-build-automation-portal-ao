@@ -515,7 +515,12 @@ spec:
   - id: prepare-publish
     action: ansible:prepare:publish
     name: Prepare for publishing
-    if: ${{ parameters.publishAndBuild.publishToSCM }}
+    # GitHub only. The portal's ansible:prepare:publish (plugin 2.2.7) never
+    # passes a host to its SCM client, so for GitLab it always asks gitlab.com
+    # and fails on a self-hosted instance ("Repository ... does not exist").
+    # The GitLab steps below build the same values from the form and the host
+    # this template names.
+    if: ${{ parameters.publishAndBuild.publishToSCM and parameters.publishAndBuild.sourceControlProvider.provider == 'github' }}
     input:
       sourceControlProvider: ${{ parameters.publishAndBuild.sourceControlProvider.provider }}
       repositoryOwner: ${{ parameters.publishAndBuild.sourceControlProvider.org }}
@@ -539,7 +544,7 @@ spec:
           tags: ${{ parameters.tags or [] }}
           annotations:
             backstage.io/techdocs-ref: dir:.
-            backstage.io/managed-by-location: ${{ steps['prepare-publish'].output.generatedRepoUrl }}
+            backstage.io/managed-by-location: ${{ steps['prepare-publish'].output.generatedRepoUrl if parameters.publishAndBuild.sourceControlProvider.provider == 'github' else ('CHANGEME_SCM_HOST?repo=' ~ parameters.publishAndBuild.sourceControlProvider.repoName ~ '&owner=' ~ parameters.publishAndBuild.sourceControlProvider.org) }}
             ansible.io/scm-provider: ${{ parameters.publishAndBuild.sourceControlProvider.provider }}
         spec:
           type: execution-environment
@@ -548,7 +553,7 @@ spec:
   - id: publish-github
     name: Create and publish to a new GitHub Repository
     action: publish:github
-    if: ${{ (parameters.publishAndBuild.publishToSCM) and (steps['prepare-publish'].output.createNewRepo)
+    if: ${{ (parameters.publishAndBuild.publishToSCM) and (not parameters.publishAndBuild.sourceControlProvider.repoExists)
       and (parameters.publishAndBuild.sourceControlProvider.provider == 'github') }}
     input:
       description: ${{ parameters.templateDescription }}
@@ -559,17 +564,17 @@ spec:
   - id: publish-gitlab
     name: Create and publish to a new GitLab Repository
     action: publish:gitlab
-    if: ${{ (parameters.publishAndBuild.publishToSCM) and (steps['prepare-publish'].output.createNewRepo)
+    if: ${{ (parameters.publishAndBuild.publishToSCM) and (not parameters.publishAndBuild.sourceControlProvider.repoExists)
       and (parameters.publishAndBuild.sourceControlProvider.provider == 'gitlab') }}
     input:
-      repoUrl: ${{ steps['prepare-publish'].output.generatedRepoUrl }}
+      repoUrl: CHANGEME_SCM_HOST?repo=${{ parameters.publishAndBuild.sourceControlProvider.repoName }}&owner=${{ parameters.publishAndBuild.sourceControlProvider.org }}
       defaultBranch: main
       repoVisibility: public
       token: ${{ secrets.USER_OAUTH_TOKEN }}
   - id: publish-github-pull-request
     name: Publish generated files as a Github Pull Request
     action: publish:github:pull-request
-    if: ${{ parameters.publishAndBuild.publishToSCM and (not steps['prepare-publish'].output.createNewRepo)
+    if: ${{ parameters.publishAndBuild.publishToSCM and (parameters.publishAndBuild.sourceControlProvider.repoExists)
       and (parameters.publishAndBuild.sourceControlProvider.provider == 'github') }}
     input:
       repoUrl: ${{ steps['prepare-publish'].output.generatedRepoUrl }}
@@ -580,20 +585,20 @@ spec:
   - id: publish-gitlab-merge-request
     name: Publish generated files as a Gitlab Merge Request
     action: publish:gitlab:merge-request
-    if: ${{ parameters.publishAndBuild.publishToSCM and (not steps['prepare-publish'].output.createNewRepo)
+    if: ${{ parameters.publishAndBuild.publishToSCM and (parameters.publishAndBuild.sourceControlProvider.repoExists)
       and (parameters.publishAndBuild.sourceControlProvider.provider == 'gitlab') }}
     input:
-      repoUrl: ${{ steps['prepare-publish'].output.generatedRepoUrl }}
-      branchName: ${{ steps['prepare-publish'].output.generatedBranchName }}
-      title: ${{ steps['prepare-publish'].output.generatedTitle }}
-      description: ${{ steps['prepare-publish'].output.generatedDescription }}
+      repoUrl: CHANGEME_SCM_HOST?repo=${{ parameters.publishAndBuild.sourceControlProvider.repoName }}&owner=${{ parameters.publishAndBuild.sourceControlProvider.org }}
+      branchName: portal-${{ parameters.eeFileName | lower }}
+      title: '[AAP] Adds/updates files for Execution Environment ${{ parameters.eeFileName }}'
+      description: This Merge Request adds Execution Environment files generated from Ansible Portal.
       token: ${{ secrets.USER_OAUTH_TOKEN }}
   - id: register-catalog-component
     name: Register published EE as a Catalog Component
     action: catalog:register
     if: ${{ parameters.publishAndBuild.publishToSCM }}
     input:
-      catalogInfoUrl: ${{ steps['prepare-publish'].output.generatedCatalogInfoUrl }}
+      catalogInfoUrl: ${{ steps['prepare-publish'].output.generatedCatalogInfoUrl if parameters.publishAndBuild.sourceControlProvider.provider == 'github' else (('https://CHANGEME_SCM_HOST/' ~ parameters.publishAndBuild.sourceControlProvider.org ~ '/' ~ parameters.publishAndBuild.sourceControlProvider.repoName) ~ '/-/blob/main/' ~ steps['create-ee-definition'].output.contextDirName ~ '/catalog-info.yaml') }}
       optional: true
   - id: dispatch-ee-build
     action: github:actions:dispatch
@@ -607,20 +612,9 @@ spec:
       workflowInputs:
         ee_image_build_tag: ${{ parameters.publishAndBuild.buildImageTag or '' }}
       token: ${{ secrets.USER_OAUTH_TOKEN }}
-  - id: dispatch-ee-build-gitlab
-    action: gitlab:pipeline:trigger
-    name: Start EE Build Pipeline
-    if: ${{ parameters.publishAndBuild.buildExecutionEnvironment and parameters.publishAndBuild.sourceControlProvider.provider
-      == 'gitlab' }}
-    input:
-      repoUrl: ${{ steps['prepare-publish'].output.generatedRepoUrl }}
-      projectId: ${{ steps['publish-gitlab'].output.projectId or steps['prepare-publish'].output.gitlabProjectId
-        }}
-      tokenDescription: EE Build Pipeline Trigger
-      branch: ${{ steps['prepare-publish'].output.generatedBranchName or 'main' }}
-      token: ${{ secrets.USER_OAUTH_TOKEN }}
-      variables:
-        EE_IMAGE_BUILD_TAG: ${{ parameters.publishAndBuild.buildImageTag or '' }}
+  # No GitLab pipeline trigger: this chain builds when the merge request is
+  # merged, through the EDA rule on the project's webhook, and the GitLab
+  # instance runs no CI.
   output:
     text:
     - title: Getting Started
@@ -629,13 +623,13 @@ spec:
         '
     links:
     - title: ${{ parameters.publishAndBuild.sourceControlProvider.providerLabel }} Repository
-      url: ${{ steps['prepare-publish'].output.generatedFullRepoUrl }}
-      if: ${{ (parameters.publishAndBuild.publishToSCM) and (steps['prepare-publish'].output.createNewRepo)
+      url: ${{ steps['prepare-publish'].output.generatedFullRepoUrl if parameters.publishAndBuild.sourceControlProvider.provider == 'github' else ('https://CHANGEME_SCM_HOST/' ~ parameters.publishAndBuild.sourceControlProvider.org ~ '/' ~ parameters.publishAndBuild.sourceControlProvider.repoName) }}
+      if: ${{ (parameters.publishAndBuild.publishToSCM) and (not parameters.publishAndBuild.sourceControlProvider.repoExists)
         }}
       icon: ${{ parameters.publishAndBuild.sourceControlProvider.provider }}
     - title: GitHub Pull Request
       url: ${{ steps['publish-github-pull-request'].output.remoteUrl }}
-      if: ${{ (parameters.publishAndBuild.publishToSCM) and (not steps['prepare-publish'].output.createNewRepo)
+      if: ${{ (parameters.publishAndBuild.publishToSCM) and (parameters.publishAndBuild.sourceControlProvider.repoExists)
         and (parameters.publishAndBuild.sourceControlProvider.provider == 'github') }}
       icon: github
     - title: ${{ parameters.publishAndBuild.sourceControlProvider.providerLabel }} EE Build Workflow Run
@@ -643,14 +637,9 @@ spec:
       if: ${{ parameters.publishAndBuild.buildExecutionEnvironment == true and parameters.publishAndBuild.sourceControlProvider.provider
         == 'github' }}
       icon: github
-    - title: GitLab EE Build Pipeline Run
-      url: ${{ steps['dispatch-ee-build-gitlab'].output.pipelineUrl }}
-      if: ${{ parameters.publishAndBuild.buildExecutionEnvironment == true and parameters.publishAndBuild.sourceControlProvider.provider
-        == 'gitlab' }}
-      icon: gitlab
     - title: GitLab Merge Request
       url: ${{ steps['publish-gitlab-merge-request'].output.mergeRequestUrl }}
-      if: ${{ (parameters.publishAndBuild.publishToSCM) and (not steps['prepare-publish'].output.createNewRepo)
+      if: ${{ (parameters.publishAndBuild.publishToSCM) and (parameters.publishAndBuild.sourceControlProvider.repoExists)
         and (parameters.publishAndBuild.sourceControlProvider.provider == 'gitlab') }}
     - title: View details in catalog
       icon: catalog
