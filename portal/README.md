@@ -6,8 +6,13 @@ push, so the portal has to know about the forge twice:
 
 | What | Why | Where |
 |---|---|---|
-| An **OAuth application** | The builder pushes as *the signed-in user*, with their OAuth token | `auth.providers.gitlab` |
-| An **access token** | The portal reads projects and registers catalog entries | `integrations.gitlab` |
+| An **access token** | The portal reads projects, registers catalog entries, and the preset builder publishes with it | `integrations.gitlab` |
+| An **OAuth application** | Red Hat's stock templates push as *the signed-in user*, with their OAuth token | `auth.providers.gitlab` |
+
+The preset builder in step 4 uses only the token, so the people ordering
+execution environments never sign in to GitLab or see it. The OAuth
+application is there for the stock templates, which ask each person to sign in
+to GitLab.
 
 GitHub works the same way, with `auth.providers.github` and
 `integrations.github`, and the builder has a `publish:github:pull-request`
@@ -27,7 +32,11 @@ Three playbooks do the work. Run them in order.
 ansible-playbook playbooks/gitlab_https.yml
 ```
 
-The builder form looks up GitLab namespaces and repositories **from the
+**Only needed for Red Hat's stock templates.** The preset builder in step 4
+never calls GitLab from the browser, so skip this if that is the only builder
+people use.
+
+The stock builder form looks up GitLab namespaces and repositories **from the
 browser**, and the portal is served over https. A browser will not let an https
 page call an http GitLab: the namespace field stays empty and then shows
 *Failed to fetch*. Current Chrome ignores the per-site *Insecure content*
@@ -48,11 +57,15 @@ ansible-playbook playbooks/portal_gitlab.yml \
   -e portal_fqdn=<portal-fqdn> -e gitlab_external_url=<gitlab-url>
 ```
 
-It creates an instance-wide OAuth application whose callback is
+It creates a GitLab user for the portal, `ee-portal`, with a random password
+nobody is told, and makes it a Developer on the definitions project and
+nothing else. The access token, scoped to `api`, belongs to that user, so
+merge requests from the builder are authored by `ee-portal`, and the token
+reaches only the definitions project. It also creates an instance-wide OAuth
+application whose callback is
 `https://<portal-fqdn>/api/auth/gitlab/handler/frame`, with the scopes the
-builder needs (`api read_api read_user read_repository write_repository` plus
-the OpenID ones Backstage resolves the user with), and an access token scoped to
-`api`. Both are written to `/root/portal-gitlab.yml` on the GitLab host and
+stock templates need (`api read_api read_user read_repository write_repository`
+plus the OpenID ones Backstage resolves the user with). Both are written to `/root/portal-gitlab.yml` on the GitLab host and
 nowhere else, so neither reaches a job's event records.
 
 GitLab stores an OAuth secret hashed. An application that already exists
@@ -180,10 +193,13 @@ name on every execution environment, even though the answer is always the same.
 The wizard is a Backstage template, so those fields take defaults.
 
 [`templates/ee-builder-preset.yaml`](templates/ee-builder-preset.yaml) is Red
-Hat's *start from scratch* template with three changes:
+Hat's *start from scratch* template with two changes:
 
-- the provider list holds one entry, so there is nothing to select
-- `sourceControlProvider` carries a default of your namespace and repository
+- **nobody signs in to GitLab.** The publishing target is fixed and shown
+  read-only, in place of Red Hat's `ScmSelector`, which looks up namespaces
+  from the browser and asks each person to sign in to GitLab first. The
+  publish steps pass no token, so they run with the integration token from
+  step 1. The merge request description names the portal user who ordered it.
 - for GitLab it skips `ansible:prepare:publish`. In the portal's 2.2.7 plugin
   that step never passes a host to its client, so for GitLab it always asks
   gitlab.com, and an order to a self-hosted instance fails with *Repository
@@ -202,9 +218,13 @@ Replace every `CHANGEME_` value:
 | `CHANGEME_SCM_OWNER` | the group | the owner |
 | `CHANGEME_DEFINITIONS_REPO` | the project name | the repository name |
 
-The defaults sit on `sourceControlProvider`'s sub-properties rather than on the
+The target sits on `sourceControlProvider`'s sub-properties rather than on the
 object. A default on the object itself is not applied to a field inside a
-`dependencies` branch, so `ScmSelector` never sees it.
+`dependencies` branch.
+
+The GitHub branches of the template are kept but untested in this form: they
+also run with the integration token, so `integrations.github` needs a token
+that can open pull requests on the definitions repository.
 
 Put the file where the portal can read it — the definitions repository is a
 good home, because the portal already has a token for it — and register it
@@ -236,7 +256,10 @@ The builder creates:
 ```
 
 It opens a merge request titled `[AAP] Adds/updates files for Execution
-Environment <name>` on a branch named `portal-<name>`.
+Environment <name>` on a branch named `portal-<name>`, authored by `ee-portal`.
+Set `portal_mr_author: ee-portal` on the *Merge Portal MR* job template and
+only that user's merge requests are merged automatically, so nobody can get one
+merged by copying the title.
 
 **Merging that request is what starts the build**: the push to `main` goes to
 the Event-Driven Ansible event stream, which starts the Build-EE workflow in

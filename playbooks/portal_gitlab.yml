@@ -8,10 +8,13 @@
 #
 # The portal needs GitLab twice, the same way it needed GitHub twice:
 #
-#   an OAuth application  the builder pushes as the signed-in user, with that
-#                         user's OAuth token (auth.providers.gitlab)
+#   an OAuth application  for templates that push as the signed-in user, with
+#                         that user's OAuth token (auth.providers.gitlab)
 #   an access token       the portal reads projects and registers catalog
-#                         entries (integrations.gitlab)
+#                         entries, and the preset builder publishes with it
+#                         (integrations.gitlab). It belongs to a GitLab user
+#                         of its own, so nobody ordering an EE signs in to
+#                         GitLab.
 #
 # Both are created here and written to a single root-only file on the GitLab
 # host. Nothing secret is printed, so none of it lands in the job's event
@@ -43,6 +46,15 @@
     # is invalid, unknown, or malformed".
     portal_oauth_scopes: api read_api read_user read_repository write_repository openid profile email
     portal_token_name: automation-portal
+    # The token belongs to a GitLab user of its own, a Developer on the
+    # definitions project and nothing else. The builder publishes with this
+    # token rather than with the signed-in person's, so its merge requests are
+    # authored by this user, and an administrator's token would reach every
+    # project on the instance.
+    portal_token_user: ee-portal
+    portal_token_user_name: Ansible automation portal
+    gitlab_group: automation
+    gitlab_project: ee-definitions
     portal_token_scopes: "api"
     portal_token_days: 364
     # Where the values land on the GitLab host. Root-only.
@@ -108,12 +120,48 @@
         {{ _oauth.rc | default(1) != 0
            or (_oauth.stdout | default('')).split() | length != 2 }}
 
+    # Created with a random password nobody is told, so it cannot sign in to
+    # the web UI; it only ever acts through the token below.
+    - name: Create the portal's GitLab user and give it the definitions project
+      ansible.builtin.command:
+        cmd: gitlab-rails runner -
+        stdin: |
+          uname = {{ portal_token_user | to_json }}
+          admin = User.find_by_username('root')
+          user = User.find_by_username(uname)
+          created = false
+          if user.nil?
+            org = Organizations::Organization.respond_to?(:default_organization) ? Organizations::Organization.default_organization : Organizations::Organization.first
+            params = {
+              username: uname,
+              name: {{ portal_token_user_name | to_json }},
+              email: "#{uname}@noreply.#{Gitlab.config.gitlab.host}",
+              password: SecureRandom.hex(32),
+              skip_confirmation: true,
+            }
+            params[:organization_id] = org.id if org
+            result = Users::CreateService.new(admin, params).execute
+            user = result.is_a?(User) ? result : result.payload[:user]
+            raise "could not create #{uname}: #{result.respond_to?(:message) ? result.message : user&.errors&.full_messages}" unless user&.persisted?
+            created = true
+          end
+          project = Project.find_by_full_path({{ (gitlab_group ~ '/' ~ gitlab_project) | to_json }})
+          raise 'no definitions project' if project.nil?
+          added = false
+          if project.team.max_member_access(user.id) < Gitlab::Access::DEVELOPER
+            project.add_member(user, Gitlab::Access::DEVELOPER)
+            added = true
+          end
+          print [created ? 'created' : 'exists', added ? 'added' : 'member'].join(' ')
+      register: _bot
+      changed_when: "'created' in _bot.stdout or 'added' in _bot.stdout"
+
     - name: Issue the portal's access token
       ansible.builtin.command:
         cmd: gitlab-rails runner -
         stdin: |
-          user = User.find_by_username('root')
-          raise 'no root user' if user.nil?
+          user = User.find_by_username({{ portal_token_user | to_json }})
+          raise 'no portal user' if user.nil?
           name = {{ portal_token_name | to_json }}
           user.personal_access_tokens.active.where(name: name).each(&:revoke!)
           token = user.personal_access_tokens.create!(
@@ -150,7 +198,7 @@
       ansible.builtin.debug:
         msg:
           - "OAuth application '{{ portal_oauth_app_name }}' now redirects to {{ _callback }}."
-          - "Access token '{{ portal_token_name }}' issued, scopes {{ portal_token_scopes }}, valid {{ portal_token_days }} days."
+          - "Access token '{{ portal_token_name }}' issued to {{ portal_token_user }} (Developer on {{ gitlab_group }}/{{ gitlab_project }}), scopes {{ portal_token_scopes }}, valid {{ portal_token_days }} days."
           - "Both written to {{ portal_credential_file }} on {{ inventory_hostname }}, readable by root only."
           - "Copy them into app-config.production.yaml on the portal, then restart it."
 

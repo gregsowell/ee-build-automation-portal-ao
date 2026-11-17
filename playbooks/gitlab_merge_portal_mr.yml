@@ -30,6 +30,11 @@
     # The portal titles every one of these the same way. Matching on it is what
     # separates the portal's merge requests from everyone else's.
     portal_mr_title_prefix: "[AAP] Adds/updates files for Execution Environment"
+    # The GitLab user the portal publishes as (portal_token_user in
+    # playbooks/portal_gitlab.yml). When set, only that user's merge requests
+    # are merged, so a person cannot get one merged by copying the title.
+    # Leave empty for a portal whose users publish as themselves.
+    portal_mr_author: ""
     # Squashing keeps one commit per execution environment on the branch, and
     # the squash message defaults to the merge request title, which carries no
     # skip marker, so the merge starts a build the way a hand merge would.
@@ -77,7 +82,8 @@
              and _state == 'opened'
              and not (_draft | bool)
              and _target == ee_git_branch
-             and _source_project | int == _target_project | int }}
+             and _source_project | int == _target_project | int
+             and (portal_mr_author | length == 0 or _author == portal_mr_author) }}
 
     - name: Leave anything else alone
       when: not _ours | bool
@@ -90,7 +96,10 @@
               {{ 'from a fork' if _source_project | int != _target_project | int
                  else 'same project' }},
               title {{ 'matches' if _title.startswith(portal_mr_title_prefix)
-                       else 'does not match' }} the portal's.
+                       else 'does not match' }} the portal's{{
+              '' if portal_mr_author | length == 0
+              else (', author is ' ~ ('' if _author == portal_mr_author else 'not ')
+                    ~ portal_mr_author) }}.
 
         - name: End the play
           ansible.builtin.meta: end_play
