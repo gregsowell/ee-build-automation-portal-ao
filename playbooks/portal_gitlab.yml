@@ -38,7 +38,10 @@
     # read_user identifies the signed-in person; api and write_repository let
     # the builder open a merge request as them. openid, profile and email are
     # what Backstage asks for when it resolves that person to a catalog user.
-    portal_oauth_scopes: api read_user read_repository write_repository openid profile email
+    # The portal's sign-in asks for read_api as well; any scope it asks for
+    # that the application lacks fails the sign-in with "The requested scope
+    # is invalid, unknown, or malformed".
+    portal_oauth_scopes: api read_api read_user read_repository write_repository openid profile email
     portal_token_name: automation-portal
     portal_token_scopes: "api"
     portal_token_days: 364
