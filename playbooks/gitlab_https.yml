@@ -1,0 +1,197 @@
+---
+# Give GitLab an https listener beside its http one, with a self-signed
+# certificate.
+#
+# Job template: "EE Build | GitLab HTTPS Listener"
+# Inventory:    one holding the GitLab host
+# Credentials:  a machine credential that can reach it, with become
+#
+# Why: the automation portal's builder form asks GitLab for namespaces and
+# repositories straight from the browser. The portal is served over https, so
+# the browser refuses to call an http GitLab ("Failed to fetch" under the
+# namespace field), and current Chrome ignores the per-site "insecure content"
+# setting for it.
+#
+# What it changes, and what it leaves alone:
+# - external_url stays http. Clone URLs, webhooks and every AAP job that already
+#   talks to GitLab over http carry on unchanged.
+# - nginx gains a second server on 443 that proxies to the same workhorse
+#   socket, wired in through nginx['custom_nginx_config'] so a reconfigure
+#   keeps it.
+# - It sends no Strict-Transport-Security header. A browser that remembered
+#   one for a self-signed host would refuse to let anyone click through the
+#   certificate warning.
+# - firewalld gets the https service.
+#
+# The certificate is a self-signed one with the hostname and address in its
+# subject alternative names. Browsers show a warning once per person; the
+# portal is told to trust it by playbooks/portal_gitlab_config.yml.
+#
+# Variables
+#   gitlab_https_hostname   Name in the certificate (default: external_url's host)
+#   gitlab_https_ip         Address in the certificate (default: the host's
+#                           default IPv4 address)
+#   gitlab_https_days       Certificate lifetime (default 3650)
+- name: Serve GitLab over https as well as http
+  hosts: "{{ gitlab_host | default('ee-builder') }}"
+  become: true
+  gather_facts: true
+
+  vars:
+    gitlab_https_days: 3650
+    gitlab_ssl_dir: /etc/gitlab/ssl
+    gitlab_https_conf: /etc/gitlab/nginx-https-listener.conf
+
+  tasks:
+    - name: Read external_url from gitlab.rb
+      ansible.builtin.command:
+        cmd: awk -F"'" '/^external_url/ {print $2; exit}' /etc/gitlab/gitlab.rb
+      register: _ext
+      changed_when: false
+
+    - name: Work out the names
+      ansible.builtin.set_fact:
+        _gl_name: >-
+          {{ gitlab_https_hostname | default(_ext.stdout | regex_replace('^https?://', '')
+             | regex_replace('[:/].*$', ''), true) }}
+        _gl_ip: "{{ gitlab_https_ip | default(ansible_default_ipv4.address, true) }}"
+
+    - name: Check external_url is still http
+      ansible.builtin.assert:
+        that:
+          - _ext.stdout is match('http://')
+        fail_msg: >-
+          external_url is already {{ _ext.stdout }}. This playbook adds https
+          beside http; with an https external_url omnibus already serves 443.
+
+    - name: Make the certificate directory
+      ansible.builtin.file:
+        path: "{{ gitlab_ssl_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Make the self-signed certificate
+      ansible.builtin.command:
+        cmd: >-
+          openssl req -x509 -newkey rsa:3072 -sha256 -nodes
+          -days {{ gitlab_https_days }}
+          -keyout {{ gitlab_ssl_dir }}/{{ _gl_name }}.key
+          -out {{ gitlab_ssl_dir }}/{{ _gl_name }}.crt
+          -subj "/CN={{ _gl_name }}"
+          -addext "subjectAltName=DNS:{{ _gl_name }},IP:{{ _gl_ip }}"
+          -addext "basicConstraints=critical,CA:TRUE"
+          -addext "keyUsage=critical,digitalSignature,keyEncipherment,keyCertSign"
+          -addext "extendedKeyUsage=serverAuth"
+        creates: "{{ gitlab_ssl_dir }}/{{ _gl_name }}.crt"
+      register: _cert
+
+    - name: Keep the key private
+      ansible.builtin.file:
+        path: "{{ gitlab_ssl_dir }}/{{ _gl_name }}.key"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Write the https server
+      ansible.builtin.copy:
+        dest: "{{ gitlab_https_conf }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by playbooks/gitlab_https.yml. An https listener beside the
+          # http one; external_url stays http.
+          server {
+            listen *:443 ssl;
+            server_name {{ _gl_name }};
+            server_tokens off;
+            client_max_body_size 0;
+
+            ssl_certificate     {{ gitlab_ssl_dir }}/{{ _gl_name }}.crt;
+            ssl_certificate_key {{ gitlab_ssl_dir }}/{{ _gl_name }}.key;
+            ssl_protocols       TLSv1.2 TLSv1.3;
+            ssl_session_cache   shared:SSL_https_listener:10m;
+
+            access_log /var/log/gitlab/nginx/gitlab_https_access.log;
+            error_log  /var/log/gitlab/nginx/gitlab_https_error.log error;
+
+            proxy_read_timeout    3600;
+            proxy_connect_timeout 300;
+            proxy_redirect        off;
+            proxy_http_version    1.1;
+            proxy_set_header Host              $http_host;
+            proxy_set_header X-Real-IP         $remote_addr;
+            proxy_set_header X-Forwarded-For   $remote_addr;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_set_header X-Forwarded-Ssl   on;
+            proxy_set_header Upgrade           $http_upgrade;
+            proxy_set_header Connection        $connection_upgrade;
+
+            location / {
+              proxy_cache off;
+              proxy_request_buffering off;
+              proxy_pass http://gitlab-workhorse;
+            }
+          }
+      register: _conf
+
+    - name: Include it from GitLab's nginx
+      ansible.builtin.lineinfile:
+        path: /etc/gitlab/gitlab.rb
+        regexp: "^nginx\\['custom_nginx_config'\\]"
+        line: "nginx['custom_nginx_config'] = \"include {{ gitlab_https_conf }};\""
+      register: _rb
+
+    - name: Reconfigure GitLab
+      ansible.builtin.command:
+        cmd: gitlab-ctl reconfigure
+      when: _rb is changed
+      changed_when: true
+
+    - name: Reload nginx for a changed server or certificate
+      ansible.builtin.command:
+        cmd: gitlab-ctl hup nginx
+      when: _rb is not changed and (_conf is changed or _cert is changed)
+      changed_when: true
+
+    # firewall-cmd rather than ansible.posix.firewalld, so the job does not
+    # depend on which collections the execution environment carries.
+    - name: Open https in the firewall
+      ansible.builtin.shell:
+        cmd: |
+          systemctl is-active --quiet firewalld || { echo inactive; exit 0; }
+          if firewall-cmd --query-service=https >/dev/null; then echo open; exit 0; fi
+          firewall-cmd --permanent --add-service=https >/dev/null
+          firewall-cmd --add-service=https >/dev/null
+          echo opened
+      register: _fw
+      changed_when: _fw.stdout == 'opened'
+
+    - name: Check GitLab answers on https
+      ansible.builtin.uri:
+        url: "https://{{ _gl_ip }}/api/v4/version"
+        headers:
+          Host: "{{ _gl_name }}"
+        validate_certs: false
+        status_code: [200, 401]
+      register: _probe
+      retries: 20
+      delay: 6
+      until: _probe.status in [200, 401]
+
+    - name: Read the certificate's fingerprint
+      ansible.builtin.command:
+        cmd: openssl x509 -in {{ gitlab_ssl_dir }}/{{ _gl_name }}.crt -noout -fingerprint -sha256 -enddate
+      register: _fp
+      changed_when: false
+
+    - name: Say what is listening
+      ansible.builtin.debug:
+        msg:
+          - "https://{{ _gl_name }} answers (HTTP {{ _probe.status }}); http is unchanged."
+          - "Certificate: {{ gitlab_ssl_dir }}/{{ _gl_name }}.crt"
+          - "{{ _fp.stdout_lines | join(' ') }}"
+          - "Firewall: https {{ _fw.stdout }}"
+          - "Each browser has to accept the certificate once: open https://{{ _gl_name }} and proceed past the warning."

@@ -20,7 +20,11 @@
 # Required variables
 #   portal_host          Inventory name of the portal appliance
 #   portal_fqdn          Its hostname, for the OAuth callback
-#   gitlab_external_url  Where GitLab answers
+#   gitlab_external_url  Where GitLab answers. Use the https address from
+#                        playbooks/gitlab_https.yml: the builder form calls
+#                        GitLab from the browser, which will not call http
+#                        from the https portal. With https, the portal is also
+#                        made to trust GitLab's self-signed certificate.
 #   gitlab_group         The group holding the definitions project
 #   gitlab_project       The definitions project
 - name: Read the portal's GitLab credentials off the GitLab host
@@ -53,6 +57,17 @@
           {{ portal_credential_file }} is missing one of the three values.
           Run playbooks/portal_gitlab.yml again.
 
+    # An https GitLab here means the self-signed listener from
+    # playbooks/gitlab_https.yml, which the portal has to be told to trust.
+    - name: Fetch GitLab's certificate for the portal to trust
+      when: gitlab_external_url | default('') is match('https://')
+      ansible.builtin.slurp:
+        src: >-
+          {{ gitlab_https_cert | default('/etc/gitlab/ssl/'
+             ~ (gitlab_external_url | regex_replace('^https://', '') | regex_replace('[:/].*$', ''))
+             ~ '.crt', true) }}
+      register: _gitlab_cert
+
 - name: Point the portal at GitLab
   hosts: "{{ portal_host }}"
   become: true
@@ -66,6 +81,8 @@
     portal_config: /etc/portal/configs/app-config/app-config.production.yaml
     portal_preset_path: .portal/ee-builder-preset.yaml
     portal_restart: true
+    portal_own_cert: /etc/portal/ssl/cert.pem
+    portal_ca_bundle: /etc/portal/ssl/ca-bundle.crt
     # Taken from the first play, so no secret travels as a job variable.
     _gl: "{{ hostvars[gitlab_host | default('ee-builder')]['portal_gitlab'] }}"
 
@@ -195,6 +212,50 @@
           with a timestamp; put it back before restarting the portal.
       no_log: true
 
+    # The portal's backend reads the template, exchanges sign-in codes and
+    # pushes merge requests over the same https URL the browser uses, so it
+    # has to trust GitLab's certificate too. The appliance takes one file in
+    # NODE_EXTRA_CA_CERTS and already points it at its own certificate, so the
+    # bundle carries both, and a later drop-in overrides the earlier setting.
+    - name: Build the bundle of certificates the portal trusts
+      when: _gl_base is match('https://')
+      vars:
+        _gitlab_pem: "{{ hostvars[gitlab_host | default('ee-builder')]['_gitlab_cert']['content'] | b64decode }}"
+      block:
+        - name: Read the portal's own certificate
+          ansible.builtin.slurp:
+            src: "{{ portal_own_cert }}"
+          register: _own_cert
+
+        - name: Write the bundle
+          ansible.builtin.copy:
+            dest: "{{ portal_ca_bundle }}"
+            owner: "{{ _cfg_stat.stat.pw_name }}"
+            group: root
+            mode: "0644"
+            content: |
+              {{ _own_cert.content | b64decode | trim }}
+              {{ _gitlab_pem | trim }}
+          register: _bundle
+
+        - name: Point the portal at the bundle
+          ansible.builtin.copy:
+            dest: /etc/containers/systemd/portal.container.d/zz-ca-bundle.conf
+            owner: root
+            group: root
+            mode: "0644"
+            content: |
+              # Managed by playbooks/portal_gitlab_config.yml: the portal's own
+              # certificate plus GitLab's. Sorts after config.conf so it wins.
+              [Container]
+              Environment=NODE_EXTRA_CA_CERTS={{ portal_ca_bundle }}
+          register: _dropin
+
+        - name: Regenerate the portal unit
+          ansible.builtin.systemd_service:
+            daemon_reload: true
+          when: _dropin is changed
+
     # The appliance's ansible-portal CLI has status, backup and restore but no
     # restart; the portal itself is an ordinary systemd unit.
     - name: Restart the portal
@@ -216,6 +277,16 @@
       delay: 15
       until: _probe.status == 400
       when: portal_restart | bool
+
+    - name: Check the running portal took the bundle
+      when:
+        - portal_restart | bool
+        - _gl_base is match('https://')
+      ansible.builtin.command:
+        cmd: podman exec portal printenv NODE_EXTRA_CA_CERTS
+      register: _ca_env
+      changed_when: false
+      failed_when: _ca_env.stdout | trim != portal_ca_bundle
 
     - name: Say what the portal will do now
       ansible.builtin.debug:
