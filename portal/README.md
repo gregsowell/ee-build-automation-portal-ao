@@ -18,7 +18,27 @@ address from outside, every delivery fails with `failed to connect to host`
 and nothing in AAP records the attempt. An in-lab GitLab has no such problem,
 which is why this is written for GitLab.
 
-Two playbooks do the work. Run them in order.
+Three playbooks do the work. Run them in order.
+
+## 0. Give GitLab an https address
+
+```bash
+# job template: EE Build | GitLab HTTPS Listener
+ansible-playbook playbooks/gitlab_https.yml
+```
+
+The builder form looks up GitLab namespaces and repositories **from the
+browser**, and the portal is served over https. A browser will not let an https
+page call an http GitLab: the namespace field stays empty and then shows
+*Failed to fetch*. Current Chrome ignores the per-site *Insecure content*
+setting for this, so there is no client-side workaround.
+
+The playbook adds a second nginx server on 443, with a self-signed certificate,
+beside GitLab's http one. `external_url` stays http, so clone URLs, webhooks
+and AAP jobs carry on unchanged. Everyone who uses the portal has to open the
+https address once and accept the certificate. Then give the https address as
+`gitlab_external_url` in step 2, which also makes the portal trust the
+certificate.
 
 ## 1. Create the OAuth application and the token
 
@@ -30,8 +50,8 @@ ansible-playbook playbooks/portal_gitlab.yml \
 
 It creates an instance-wide OAuth application whose callback is
 `https://<portal-fqdn>/api/auth/gitlab/handler/frame`, with the scopes the
-builder needs (`api read_user read_repository write_repository` plus the
-OpenID ones Backstage resolves the user with), and an access token scoped to
+builder needs (`api read_api read_user read_repository write_repository` plus
+the OpenID ones Backstage resolves the user with), and an access token scoped to
 `api`. Both are written to `/root/portal-gitlab.yml` on the GitLab host and
 nowhere else, so neither reaches a job's event records.
 
@@ -160,10 +180,17 @@ name on every execution environment, even though the answer is always the same.
 The wizard is a Backstage template, so those fields take defaults.
 
 [`templates/ee-builder-preset.yaml`](templates/ee-builder-preset.yaml) is Red
-Hat's *start from scratch* template with two changes:
+Hat's *start from scratch* template with three changes:
 
 - the provider list holds one entry, so there is nothing to select
 - `sourceControlProvider` carries a default of your namespace and repository
+- for GitLab it skips `ansible:prepare:publish`. In the portal's 2.2.7 plugin
+  that step never passes a host to its client, so for GitLab it always asks
+  gitlab.com, and an order to a self-hosted instance fails with *Repository
+  ... does not exist and creating a new repository was not enabled*. The
+  GitLab steps build the repository URL from `CHANGEME_SCM_HOST` and use a
+  branch, title and description of their own. The title keeps the portal's
+  wording, which is what the auto-merge rule matches.
 
 Replace every `CHANGEME_` value:
 
@@ -209,13 +236,13 @@ The builder creates:
 ```
 
 It opens a merge request titled `[AAP] Adds/updates files for Execution
-Environment <name>` on a branch named after the definition.
+Environment <name>` on a branch named `portal-<name>`.
 
 **Merging that request is what starts the build**: the push to `main` goes to
 the Event-Driven Ansible event stream, which starts the Build-EE workflow in
 automation orchestrator.
 
 The builder also offers to build the image itself, in GitHub Actions or a
-GitLab pipeline. Leave that unchecked: this chain does the build on your own
+GitLab pipeline (the preset drops the GitLab pipeline step). Leave that unchecked: this chain does the build on your own
 build host, against your own hub, and running both just builds everything
 twice.
